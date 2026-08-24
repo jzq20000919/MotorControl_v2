@@ -15,7 +15,7 @@
 
 extern FDCAN_HandleTypeDef hfdcan1; /**< CubeMX 生成并初始化的 FDCAN1 句柄。 */
 
-#define MOTOR_CAN_TELEMETRY_PERIOD_MS       (20UL)
+#define MOTOR_CAN_TELEMETRY_PERIOD_MS        (2UL)
 #define MOTOR_CAN_LINK_TIMEOUT_MS           (300UL)
 #define MOTOR_CAN_INIT_RETRY_MS              (500UL)
 #define MOTOR_CAN_BUS_OFF_RECOVERY_MS        (100UL)
@@ -127,6 +127,15 @@ static bool CAN_STM_ExecuteCommand(const uint8_t data[8])
 
     case MOTOR_CAN_CMD_ACK_FAULT:
       return CommMgr_STM_AcknowledgeFault();
+
+    case MOTOR_CAN_CMD_SET_PID_GAIN:
+    {
+      const uint32_t packed = MotorCan_ReadU32(&data[3]);
+      return CommMgr_STM_SetPidGain(
+        (MotorPidController_STM)(packed & 0xFFU),
+        (MotorPidTerm_STM)((packed >> 8U) & 0xFFU),
+        (int16_t)(packed >> 16U));
+    }
 
     case MOTOR_CAN_CMD_ZERO_POSITION:
     default:

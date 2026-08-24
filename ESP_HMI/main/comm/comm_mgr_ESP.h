@@ -21,6 +21,23 @@ typedef enum
     COMM_MGR_ESP_MODE_POSITION = 1 /**< 位置闭环控制模式。 */
 } CommMgr_ESP_mode_t;
 
+/** @brief 可临时调整的电机调节器编号；数值与 STM32 应用层一致。 */
+typedef enum
+{
+    COMM_MGR_ESP_PID_SPEED = 0,
+    COMM_MGR_ESP_PID_POSITION = 1,
+    COMM_MGR_ESP_PID_IQ = 2,
+    COMM_MGR_ESP_PID_ID = 3
+} CommMgr_ESP_pid_controller_t;
+
+/** @brief PID 增益项编号；数值与 STM32 应用层一致。 */
+typedef enum
+{
+    COMM_MGR_ESP_PID_KP = 0,
+    COMM_MGR_ESP_PID_KI = 1,
+    COMM_MGR_ESP_PID_KD = 2
+} CommMgr_ESP_pid_term_t;
+
 /** @brief 汇总 UART/CAN 状态的统一电机遥测快照。 */
 typedef struct
 {
@@ -49,6 +66,8 @@ typedef struct
     int16_t id_reference_ma;          /**< d 轴电流参考值，单位 mA。 */
     int16_t uq_mv;                    /**< q 轴电压指令，单位 mV。 */
     int16_t ud_mv;                    /**< d 轴电压指令，单位 mV。 */
+    uint32_t sample_sequence;         /**< CAN 完整遥测样本序号。 */
+    int64_t sample_timestamp_us;      /**< CAN 完整样本到达时间。 */
     uint32_t received_frames;         /**< 活动通道累计有效接收帧数。 */
     uint32_t transmitted_frames;      /**< 活动通道累计成功发送帧数。 */
     uint32_t transmit_errors;         /**< 活动通道累计发送错误次数。 */
@@ -73,6 +92,9 @@ void CommMgr_ESP_SetMode(CommMgr_ESP_mode_t mode);
 void CommMgr_ESP_SetSpeedRPM(int16_t speed_rpm);
 /** @brief 向活动通道请求位置目标。 @param position_cdeg 目标位置，单位 0.01°。 */
 void CommMgr_ESP_SetPositionCdeg(uint16_t position_cdeg);
+/** @brief 排队临时设置一个 PID 增益。 */
+void CommMgr_ESP_SetPidGain(CommMgr_ESP_pid_controller_t controller,
+                            CommMgr_ESP_pid_term_t term, int16_t value);
 /** @brief 请求活动通道启动电机。 */
 void CommMgr_ESP_Start(void);
 /** @brief 请求活动通道停止电机。 */

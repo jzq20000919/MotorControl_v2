@@ -15,7 +15,7 @@
 
 #define MOTOR_CAN_TX_GPIO                  GPIO_NUM_5
 #define MOTOR_CAN_RX_GPIO                  GPIO_NUM_6
-#define MOTOR_CAN_CONTROL_QUEUE_LENGTH     12U
+#define MOTOR_CAN_CONTROL_QUEUE_LENGTH     24U
 #define MOTOR_CAN_RX_QUEUE_LENGTH          24U
 #define MOTOR_CAN_TX_QUEUE_DEPTH           4U
 #define MOTOR_CAN_TX_TIMEOUT_MS            5
@@ -190,6 +190,9 @@ static esp_err_t CAN_ESP_transmit(MotorCan_Command_t command, int32_t value)
     case MOTOR_CAN_CMD_SET_POSITION_CDEG:
         MotorCan_WriteS32(&s_tx_data[3], value);
         break;
+    case MOTOR_CAN_CMD_SET_PID_GAIN:
+        MotorCan_WriteS32(&s_tx_data[3], value);
+        break;
     default:
         break;
     }
@@ -300,11 +303,14 @@ static void CAN_ESP_parse_references(const CAN_ESP_rx_frame_t *frame)
  */
 static void CAN_ESP_parse_electrical(const CAN_ESP_rx_frame_t *frame)
 {
+    const int64_t now_us = esp_timer_get_time();
     portENTER_CRITICAL(&s_lock);
     s_snapshot.iq_ma = MotorCan_ReadS16(&frame->data[0]);
     s_snapshot.id_ma = MotorCan_ReadS16(&frame->data[2]);
     s_snapshot.iq_reference_ma = MotorCan_ReadS16(&frame->data[4]);
     s_snapshot.id_reference_ma = MotorCan_ReadS16(&frame->data[6]);
+    s_snapshot.sample_sequence++;
+    s_snapshot.sample_timestamp_us = now_us;
     s_snapshot.received_frames++;
     portEXIT_CRITICAL(&s_lock);
 }
@@ -486,8 +492,6 @@ static void CAN_ESP_restore_speed_if_latest(int16_t speed_rpm)
 static void CAN_ESP_tx_task(void *argument)
 {
     (void)argument;
-    /** 周期任务的上一次唤醒节拍，用于 vTaskDelayUntil 保持固定周期。 */
-    TickType_t last_wake = xTaskGetTickCount();
     /** 下一次允许发送 PING 心跳的时间戳，单位为 μs。 */
     int64_t next_heartbeat_us = 0;
 
@@ -499,7 +503,7 @@ static void CAN_ESP_tx_task(void *argument)
          */
         if (!CAN_ESP_service_bus_state()) 
         {
-            vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(MOTOR_CAN_TX_TASK_PERIOD_MS));
+            vTaskDelay(pdMS_TO_TICKS(MOTOR_CAN_TX_TASK_PERIOD_MS));
             continue;
         }
 
@@ -554,7 +558,13 @@ static void CAN_ESP_tx_task(void *argument)
                 now_us + (CAN_ESP_HEARTBEAT_PERIOD_MS * 1000LL);
         }
 
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(MOTOR_CAN_TX_TASK_PERIOD_MS));
+        /*
+         * 无 CAN ACK 时 transmit_wait_all_done() 本身可能耗尽整个 5 ms 周期。
+         * 继续使用 vTaskDelayUntil() 会因为已经错过唤醒点而立即再次运行，使
+         * 高优先级 TX 任务长期占满 Core 0，并触发任务看门狗、拖断 Wi-Fi/MQTT。
+         * 每轮强制让出一个完整周期，保证空闲任务和网络任务始终能够运行。
+         */
+        vTaskDelay(pdMS_TO_TICKS(MOTOR_CAN_TX_TASK_PERIOD_MS));
     }
 }
 
@@ -805,6 +815,14 @@ void CAN_ESP_SetPositionCdeg(uint16_t position_cdeg)
     s_pending_position_cdeg = position_cdeg % 36000U;
     s_position_dirty = true;
     portEXIT_CRITICAL(&s_lock);
+}
+
+/** @brief 将控制器、增益项和 int16 增益打包为一个离散 CAN 命令。 */
+void CAN_ESP_SetPidGain(uint8_t controller, uint8_t term, int16_t value)
+{
+    const uint32_t packed = ((uint32_t)(uint16_t)value << 16U)
+        | ((uint32_t)term << 8U) | (uint32_t)controller;
+    CAN_ESP_queue_control(MOTOR_CAN_CMD_SET_PID_GAIN, (int32_t)packed);
 }
 
 /** @brief 排队一个 CAN 电机启动命令。 */

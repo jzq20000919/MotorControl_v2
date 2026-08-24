@@ -20,6 +20,9 @@ bool CommMgr_STM_SetPosition(int32_t targetCdeg, uint32_t durationMs);
 /** @brief 统一请求最近单圈位置轨迹。 */
 bool CommMgr_STM_SetNearestPosition(int32_t targetCdeg, uint32_t minimumDurationMs,
                                     uint32_t speedCdegPerSecond);
+/** @brief 统一请求临时修改一个 PID 增益。 */
+bool CommMgr_STM_SetPidGain(MotorPidController_STM controller,
+                            MotorPidTerm_STM term, int16_t value);
 /** @brief 统一请求启动电机。 */
 bool CommMgr_STM_Start(void);
 /** @brief 统一请求停止电机。 */

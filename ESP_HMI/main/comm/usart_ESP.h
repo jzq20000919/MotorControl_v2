@@ -57,6 +57,8 @@ void USART_ESP_SetMode(MotorUart_Mode_t mode);
 void USART_ESP_SetSpeedRPM(int16_t speed_rpm);
 /** @brief 保存最新位置目标，供 UART 周期发送。 @param position_cdeg 目标位置，单位 0.01°。 */
 void USART_ESP_SetPositionCdeg(uint16_t position_cdeg);
+/** @brief 排队临时设置一个 PID 增益。 */
+void USART_ESP_SetPidGain(uint8_t controller, uint8_t term, int16_t value);
 /** @brief 排队一个 UART 电机启动命令。 */
 void USART_ESP_Start(void);
 /** @brief 排队一个 UART 电机停止命令。 */

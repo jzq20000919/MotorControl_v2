@@ -27,6 +27,8 @@ typedef struct
     int16_t id_ma;                   /**< d 轴实测电流，单位 mA。 */
     int16_t iq_reference_ma;         /**< q 轴电流参考值，单位 mA。 */
     int16_t id_reference_ma;         /**< d 轴电流参考值，单位 mA。 */
+    uint32_t sample_sequence;        /**< 每收到一组完整遥测后递增。 */
+    int64_t sample_timestamp_us;     /**< 完整样本到达 ESP32 的单调时间戳。 */
     uint32_t received_frames;        /**< 累计有效接收帧数。 */
     uint32_t transmitted_frames;     /**< 累计成功发送帧数。 */
     uint32_t transmit_errors;        /**< 累计发送错误次数。 */
@@ -49,6 +51,8 @@ void CAN_ESP_SetMode(MotorCan_Mode_t mode);
 void CAN_ESP_SetSpeedRPM(int16_t speed_rpm);
 /** @brief 保存最新位置目标，供 CAN 周期发送。 @param position_cdeg 目标位置，单位 0.01°。 */
 void CAN_ESP_SetPositionCdeg(uint16_t position_cdeg);
+/** @brief 排队临时设置一个 PID 增益。 */
+void CAN_ESP_SetPidGain(uint8_t controller, uint8_t term, int16_t value);
 /** @brief 排队一个 CAN 电机启动命令。 */
 void CAN_ESP_Start(void);
 /** @brief 排队一个 CAN 电机停止命令。 */

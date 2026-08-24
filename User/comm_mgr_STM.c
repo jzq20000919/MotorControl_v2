@@ -36,6 +36,12 @@ bool CommMgr_STM_SetNearestPosition(int32_t targetCdeg, uint32_t minimumDuration
 {
   return MotorMgr_STM_SetNearestSingleTurnPosition(targetCdeg, minimumDurationMs, speedCdegPerSecond);
 }
+/** @brief 转发临时 PID 增益到唯一的电机管理层。 */
+bool CommMgr_STM_SetPidGain(MotorPidController_STM controller,
+                            MotorPidTerm_STM term, int16_t value)
+{
+  return MotorMgr_STM_SetPidGain(controller, term, value);
+}
 /** @brief 转发启动命令到唯一的电机管理层。 */
 bool CommMgr_STM_Start(void) { return MotorMgr_STM_Start(); }
 /** @brief 转发停止命令到唯一的电机管理层。 */

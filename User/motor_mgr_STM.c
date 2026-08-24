@@ -37,7 +37,8 @@ static int32_t MotorMgr_STM_NormalizeCdeg(int32_t positionCdeg)
 static void MotorMgr_STM_HoldCurrentPosition(void)
 {
   const float currentPosition = MC_GetCurrentPosition1();
-  PID_HandleInit(&PID_PosParamsM1);
+  PID_SetIntegralTerm(&PID_PosParamsM1, 0);
+  PID_SetPrevError(&PID_PosParamsM1, 0);
   PosCtrlM1.MovementDuration = 0.0F;
   PosCtrlM1.AngleStep = 0.0F;
   PosCtrlM1.Jerk = 0.0F;
@@ -60,7 +61,8 @@ static void MotorMgr_STM_EnterSpeedMode(void)
   PosCtrlM1.PositionControlRegulation = false;
   PosCtrlM1.PositionCtrlStatus = TC_READY_FOR_COMMAND;
   PosCtrlM1.MovementDuration = 0.0F;
-  PID_HandleInit(&PID_PosParamsM1);
+  PID_SetIntegralTerm(&PID_PosParamsM1, 0);
+  PID_SetPrevError(&PID_PosParamsM1, 0);
   if (MC_GetSTMStateMotor1() == RUN) MC_ProgramSpeedRampMotor1_F(0.0F, 0U);
 }
 
@@ -164,8 +166,47 @@ bool MotorMgr_STM_SetNearestSingleTurnPosition(int32_t targetCdeg,
   return MotorMgr_STM_SetPosition(current + delta, durationMs);
 }
 
-/** @brief 启动电机，并把已处于 RUN 的幂等请求视为成功。 */
-bool MotorMgr_STM_Start(void) { return (MC_GetSTMStateMotor1() == RUN) ? true : MC_StartMotor1(); }
+/** @brief 选择 MCSDK PID 句柄并在停机状态临时替换一个增益分子。 */
+bool MotorMgr_STM_SetPidGain(MotorPidController_STM controller,
+                             MotorPidTerm_STM term, int16_t value)
+{
+  PID_Handle_t *handle;
+  if ((MC_GetSTMStateMotor1() == RUN) || (value < 0)) return false;
+
+  switch (controller)
+  {
+    case MOTOR_PID_STM_SPEED: handle = &PIDSpeedHandle_M1; break;
+    case MOTOR_PID_STM_POSITION: handle = &PID_PosParamsM1; break;
+    case MOTOR_PID_STM_IQ: handle = &PIDIqHandle_M1; break;
+    case MOTOR_PID_STM_ID: handle = &PIDIdHandle_M1; break;
+    default: return false;
+  }
+
+  switch (term)
+  {
+    case MOTOR_PID_TERM_STM_KP: PID_SetKP(handle, value); break;
+    case MOTOR_PID_TERM_STM_KI: PID_SetKI(handle, value); break;
+    case MOTOR_PID_TERM_STM_KD: PID_SetKD(handle, value); break;
+    default: return false;
+  }
+  PID_SetIntegralTerm(handle, 0);
+  PID_SetPrevError(handle, 0);
+  return true;
+}
+
+/**
+ * @brief 装载安全的启动参考后启动电机，并把已处于 RUN 的请求视为成功。
+ * @note MCSDK 要求 MC_StartMotor1() 前必须先执行速度、转矩或电流参考命令；
+ *       否则启动行为未定义。零速参考只用于完成启动，ESP32 会在确认 RUN 后
+ *       再下发本次速度或位置测试目标。
+ */
+bool MotorMgr_STM_Start(void)
+{
+  if (MC_GetSTMStateMotor1() == RUN) return true;
+  if (MC_GetSTMStateMotor1() != IDLE) return false;
+  MC_ProgramSpeedRampMotor1_F(0.0F, 0U);
+  return MC_StartMotor1();
+}
 /** @brief 将停止请求原样交给 MCSDK。 */
 bool MotorMgr_STM_Stop(void) { return MC_StopMotor1(); }
 /** @brief 将故障确认请求原样交给 MCSDK。 */

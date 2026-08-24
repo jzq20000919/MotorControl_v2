@@ -2,6 +2,7 @@
 #define MQTT_MANAGER_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -67,6 +68,11 @@ esp_err_t mqtt_manager_publish(
 esp_err_t mqtt_manager_publish_qos0(
     const char *topic,
     const char *payload);
+/** @brief 发布指定长度的 QoS 1 二进制数据，允许负载包含零字节。 */
+esp_err_t mqtt_manager_publish_binary_qos1(
+    const char *topic,
+    const void *payload,
+    size_t payload_length);
 /**
  * @brief 注册接收完整 MQTT 入站消息的应用回调。
  * @param callback 消息回调；传 NULL 可取消注册。

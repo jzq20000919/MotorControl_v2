@@ -33,7 +33,8 @@ typedef enum
   MOTOR_CAN_CMD_STOP = 5,              /**< 停止电机。 */
   MOTOR_CAN_CMD_ACK_FAULT = 6,         /**< 确认并复位电机故障。 */
   MOTOR_CAN_CMD_ZERO_POSITION = 7,     /**< 请求将当前位置设为零点。 */
-  MOTOR_CAN_CMD_PING = 8               /**< 链路心跳命令。 */
+  MOTOR_CAN_CMD_PING = 8,              /**< 链路心跳命令。 */
+  MOTOR_CAN_CMD_SET_PID_GAIN = 9       /**< 临时设置一个 PID 增益。 */
 } MotorCan_Command_t;
 
 /** @brief CAN 控制模式编码。 */

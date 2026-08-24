@@ -14,8 +14,8 @@ qt_add_executable(QtMqttSimpleControl WIN32
     src/mainwindow.h
     src/mqttclient.cpp
     src/mqttclient.h
-    src/plotwidget.cpp
-    src/plotwidget.h
+    src/plotrenderer.cpp
+    src/plotrenderer.h
 )
 
 target_link_libraries(QtMqttSimpleControl PRIVATE
@@ -32,5 +32,19 @@ if(WIN32)
     target_compile_definitions(QtMqttSimpleControl PRIVATE
         NOMINMAX
         WIN32_LEAN_AND_MEAN
+    )
+endif()
+
+include(CTest)
+if(BUILD_TESTING)
+    qt_add_executable(PlotRendererSmokeTest
+        tests/plotrenderer_smoke.cpp
+        src/plotrenderer.cpp
+        src/plotrenderer.h
+    )
+    target_link_libraries(PlotRendererSmokeTest PRIVATE Qt6::Widgets)
+    add_test(NAME PlotRendererSmokeTest COMMAND PlotRendererSmokeTest)
+    set_tests_properties(PlotRendererSmokeTest PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
     )
 endif()

@@ -1,5 +1,6 @@
 #include "mqtt_manager.h"
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -462,6 +463,33 @@ esp_err_t mqtt_manager_publish_qos0(
     esp_mqtt_client_handle_t client = s_client;
     mqtt_manager_unlock();
     const int message_id = esp_mqtt_client_enqueue(client, topic, payload, 0, 0, 0, true);
+    mqtt_manager_client_api_unlock();
+    return message_id >= 0 ? ESP_OK : ESP_FAIL;
+}
+
+/** @brief 通过活动客户端排队一条带显式长度的 QoS 1 二进制消息。 */
+esp_err_t mqtt_manager_publish_binary_qos1(
+    const char *topic,
+    const void *payload,
+    size_t payload_length)
+{
+    if (topic == NULL || topic[0] == '\0' || payload == NULL ||
+        payload_length == 0U || payload_length > INT_MAX) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    mqtt_manager_client_api_lock();
+    mqtt_manager_lock();
+    if (!s_snapshot.connected || s_client == NULL) {
+        mqtt_manager_unlock();
+        mqtt_manager_client_api_unlock();
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_mqtt_client_handle_t client = s_client;
+    mqtt_manager_unlock();
+    const int message_id = esp_mqtt_client_enqueue(
+        client, topic, (const char *)payload, (int)payload_length,
+        1, 0, true);
     mqtt_manager_client_api_unlock();
     return message_id >= 0 ? ESP_OK : ESP_FAIL;
 }

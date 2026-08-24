@@ -22,6 +22,7 @@ idf_component_register(
         "ui"
 
     PRIV_REQUIRES
+        app_update
         esp_lcd
         esp_driver_gpio
         esp_driver_i2c
@@ -35,4 +36,5 @@ idf_component_register(
         espressif__mqtt
         lvgl
         nvs_flash
+        spi_flash
 )

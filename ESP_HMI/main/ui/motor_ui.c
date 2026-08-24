@@ -605,7 +605,7 @@ static void ui_create_mqtt_page(lv_obj_t *parent)
     lv_obj_set_pos(s_mqtt_uri_textarea, 8, 34);
     lv_textarea_set_one_line(s_mqtt_uri_textarea, true);
     lv_textarea_set_max_length(s_mqtt_uri_textarea, MQTT_MANAGER_URI_MAX_LEN);
-    lv_textarea_set_text(s_mqtt_uri_textarea, "mqtt://192.168.10.4:1883");
+    lv_textarea_set_text(s_mqtt_uri_textarea, "mqtt://192.168.10.7:1883");
     motor_ui_style_textarea(s_mqtt_uri_textarea);
     lv_obj_add_event_cb(s_mqtt_uri_textarea, motor_ui_mqtt_uri_event, LV_EVENT_CLICKED, NULL);
 

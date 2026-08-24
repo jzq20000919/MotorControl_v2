@@ -39,7 +39,8 @@ typedef enum
   MOTOR_UART_CMD_STOP = 5,              /**< 停止电机。 */
   MOTOR_UART_CMD_ACK_FAULT = 6,         /**< 确认并复位电机故障。 */
   MOTOR_UART_CMD_ZERO_POSITION = 7,     /**< 请求将当前位置设为零点。 */
-  MOTOR_UART_CMD_PING = 8               /**< 链路心跳命令。 */
+  MOTOR_UART_CMD_PING = 8,              /**< 链路心跳命令。 */
+  MOTOR_UART_CMD_SET_PID_GAIN = 9       /**< 临时设置一个 PID 增益。 */
 } MotorUart_Command_t;
 
 /** @brief UART 控制模式编码。 */

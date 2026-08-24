@@ -178,6 +178,8 @@ void CommMgr_ESP_GetState(CommMgr_ESP_State *snapshot)
         snapshot->id_ma = can.id_ma;
         snapshot->iq_reference_ma = can.iq_reference_ma;
         snapshot->id_reference_ma = can.id_reference_ma;
+        snapshot->sample_sequence = can.sample_sequence;
+        snapshot->sample_timestamp_us = can.sample_timestamp_us;
         snapshot->received_frames = can.received_frames;
         snapshot->transmitted_frames = can.transmitted_frames;
         snapshot->transmit_errors = can.transmit_errors;
@@ -213,6 +215,18 @@ void CommMgr_ESP_SetPositionCdeg(uint16_t position_cdeg)
 {
     if (s_transport == COMM_MGR_ESP_USART) USART_ESP_SetPositionCdeg(position_cdeg);
     if (s_transport == COMM_MGR_ESP_CAN) CAN_ESP_SetPositionCdeg(position_cdeg);
+}
+
+/** @brief 将一个临时 PID 增益请求路由到当前活动传输通道。 */
+void CommMgr_ESP_SetPidGain(CommMgr_ESP_pid_controller_t controller,
+                            CommMgr_ESP_pid_term_t term, int16_t value)
+{
+    if (s_transport == COMM_MGR_ESP_USART) {
+        USART_ESP_SetPidGain((uint8_t)controller, (uint8_t)term, value);
+    }
+    if (s_transport == COMM_MGR_ESP_CAN) {
+        CAN_ESP_SetPidGain((uint8_t)controller, (uint8_t)term, value);
+    }
 }
 
 /** @brief 在当前选择的通道上排队发送电机启动命令。 */

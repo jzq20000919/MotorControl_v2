@@ -21,6 +21,9 @@ bool MotorMgr_STM_SetPosition(int32_t targetCdeg, uint32_t durationMs);
 bool MotorMgr_STM_SetNearestSingleTurnPosition(int32_t targetCdeg,
                                                uint32_t minimumDurationMs,
                                                uint32_t speedCdegPerSecond);
+/** @brief 电机停止时临时修改一个 PID 增益；不会修改工程默认值或 Flash。 */
+bool MotorMgr_STM_SetPidGain(MotorPidController_STM controller,
+                             MotorPidTerm_STM term, int16_t value);
 /** @brief 启动电机；已处于 RUN 时按成功处理。 */
 bool MotorMgr_STM_Start(void);
 /** @brief 请求电机停止。 */

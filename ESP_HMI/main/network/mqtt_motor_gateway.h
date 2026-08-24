@@ -7,6 +7,10 @@
 #define MQTT_MOTOR_TELEMETRY_TOPIC "motor/control/telemetry"
 /** @brief 发布电机命令执行确认的 MQTT 主题。 */
 #define MQTT_MOTOR_ACK_TOPIC       "motor/control/ack"
+/** @brief 发布 ESP32 本地测试阶段与结果摘要的主题。 */
+#define MQTT_MOTOR_TEST_STATUS_TOPIC "motor/control/test/status"
+/** @brief 测试结束后发布二进制采样分块的主题。 */
+#define MQTT_MOTOR_TEST_DATA_TOPIC   "motor/control/test/data"
 
 /**
  * @brief 启动 MQTT 到 CommMgr_ESP 的命令网关及遥测发布器。

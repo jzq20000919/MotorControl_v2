@@ -110,6 +110,14 @@ static bool USART_STM_HandleCommand(const uint8_t *payload)
       return CommMgr_STM_Stop();
     case MOTOR_UART_CMD_ACK_FAULT:
       return CommMgr_STM_AcknowledgeFault();
+    case MOTOR_UART_CMD_SET_PID_GAIN:
+    {
+      const uint32_t packed = (uint32_t)value;
+      return CommMgr_STM_SetPidGain(
+        (MotorPidController_STM)(packed & 0xFFU),
+        (MotorPidTerm_STM)((packed >> 8U) & 0xFFU),
+        (int16_t)(packed >> 16U));
+    }
     case MOTOR_UART_CMD_ZERO_POSITION:
     default:
       return false;

@@ -1,23 +1,53 @@
 # QtMqttSimpleControl
 
-Qt 6 Widgets MQTT 电机控制与运行曲线记录程序，从
-`E:\MotorControl\QtMqttSimpleControl` 移植并扩展到当前工程。
+Qt 6 Widgets MQTT 电机 PID 测试程序。程序通过 ESP32 MQTT 网关临时调整
+STM32 MCSDK 的速度、位置、Iq 和 Id 调节器，并执行固定 7 秒跟踪测试。
 
-## 功能
+## PID 参数
 
-- 连接 Mosquitto，并向 `motor/control/command` 发布 QoS 1 控制命令。
-- 订阅 `motor/control/telemetry`，接收 ESP32 每 250 ms 发布的电机遥测。
-- 遥测确认电机进入运行状态时自动清空并开始记录；确认停止或 MQTT
-  断开时停止记录并绘图。
-- 所有控制模式都绘制 `Iq / Iq 目标 / Id / Id 目标` 电流曲线。
-- 速度模式额外绘制实测速度和参考速度；位置模式额外绘制实测位置和
-  目标位置。
-- 横轴统一为记录开始后的秒数；纵轴分别使用 mA、RPM 和度，并根据数据
-  自动缩放。
+界面中的数值是当前 MCSDK 工程使用的增益分子，分频保持固件生成值不变：
 
-记录由电机遥测中的 `running` 状态驱动，因此只有启动命令真正生效后才会
-开始；停止命令真正生效后才会结束。如果程序连接时电机已经在运行，也会
-从收到的第一帧运行遥测开始记录。
+| 控制器 | 工程默认值 Kp/Ki/Kd | 固定分频 |
+| --- | --- | --- |
+| 速度 | 2144 / 5 / 0 | 2048 / 16384 / 禁用 |
+| 位置 | 48 / 4 / 8 | 1024 / 32768 / 16 |
+| Iq 电流 | 3633 / 2693 / 0 | 128 / 512 / 禁用 |
+| Id 电流 | 3633 / 2693 / 0 | 128 / 512 / 禁用 |
+
+- `临时应用 PID`：只在电机停止时通过 MQTT 下发；不写 STM32 Flash，也不改变
+  生成代码中的默认值。
+- `保存 PID 参数`：使用 Qt `QSettings` 保存当前界面值，下次启动程序自动载入。
+  只有点击该按钮才会改变已保存配置。
+- `恢复工程默认 PID`：删除已保存配置，恢复上表的当前工程值；连接且停机时也会
+  立即临时下发默认值。
+
+## 7 秒测试
+
+点击 `速度测试` 或 `位置测试` 后，程序依次执行：
+
+1. Qt 发送一条原子 `run_test` 指令，指令内包含模式、目标和当前四组 PID；
+2. ESP32 自动选择 CAN，确认 STM32 停机后依次应用 PID 和控制模式；
+3. ESP32 启动电机，确认进入 RUN 后下发测试目标；
+4. STM32 每 2 ms 发送一组 CAN 遥测，ESP32 在本地 Flash 临时区记录完整 7 秒数据；
+5. ESP32 自动停止电机，随后才通过 MQTT QoS 1 分块回传记录；
+6. Qt 校验并重组完整数据集，然后把曲线渲染为 PNG 文件。
+
+实验运行期间不通过 MQTT 连续传输曲线数据，因此 Wi-Fi/MQTT 抖动不会降低
+采样时间分辨率。当前设置的目标采样周期是 2 ms，约为每秒 500 组完整样本；
+每组包含速度、位置、Iq、Id 及对应参考值。Qt 会显示最终点数和实际平均采样周期。
+
+程序不再显示曲线界面。默认保存目录是用户文档目录下的
+`MotorControl_PID_Tests`，可在界面中修改和打开。图像上半部分始终包含
+`Iq / Iq目标 / Id / Id目标`，下半部分按测试类型显示实测/参考速度或
+实测/目标位置，并在标题下记录本次使用的 PID 参数。
+
+MQTT 主题：
+
+- 命令：`motor/control/command`
+- 遥测：`motor/control/telemetry`
+- 确认：`motor/control/ack`
+- 测试阶段：`motor/control/test/status`
+- 测试二进制数据：`motor/control/test/data`
 
 ## 构建
 
@@ -27,4 +57,5 @@ cmake -S QtMqttSimpleControl -B QtMqttSimpleControl/build `
 cmake --build QtMqttSimpleControl/build
 ```
 
-程序只依赖 Qt 6 的 `Network` 和 `Widgets` 模块，不依赖 Qt Charts。
+程序只依赖 Qt 6 的 `Network`、`Widgets` 和 QtGui 内置图像绘制能力，不依赖
+Qt Charts。

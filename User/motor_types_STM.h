@@ -11,6 +11,23 @@ typedef enum
   MOTOR_MODE_STM_POSITION = 1
 } MotorMode_STM;
 
+/** @brief 可通过上位机临时调整的调节器编号。 */
+typedef enum
+{
+  MOTOR_PID_STM_SPEED = 0,
+  MOTOR_PID_STM_POSITION = 1,
+  MOTOR_PID_STM_IQ = 2,
+  MOTOR_PID_STM_ID = 3
+} MotorPidController_STM;
+
+/** @brief PID 调节器中的增益项编号。 */
+typedef enum
+{
+  MOTOR_PID_TERM_STM_KP = 0,
+  MOTOR_PID_TERM_STM_KI = 1,
+  MOTOR_PID_TERM_STM_KD = 2
+} MotorPidTerm_STM;
+
 /** @brief 由 MotorMgr_STM 统一采集、供所有通信通道只读使用的电机状态。 */
 typedef struct
 {

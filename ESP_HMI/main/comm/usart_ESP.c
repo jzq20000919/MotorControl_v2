@@ -17,7 +17,7 @@
 #define MOTOR_UART_RX_GPIO              GPIO_NUM_8
 #define MOTOR_UART_RX_BUFFER_SIZE       (1024U)
 #define MOTOR_UART_TX_BUFFER_SIZE       (1024U)
-#define MOTOR_UART_CONTROL_QUEUE_SIZE   (8U)
+#define MOTOR_UART_CONTROL_QUEUE_SIZE   (24U)
 #define MOTOR_UART_LINK_TIMEOUT_MS      (300U)
 #define MOTOR_UART_TX_TASK_PERIOD_MS    (2U)
 #define MOTOR_UART_PING_PERIOD_MS       (100U)
@@ -604,6 +604,14 @@ void USART_ESP_SetPositionCdeg(uint16_t position_cdeg)
     s_latest_position_cdeg = position_cdeg;
     s_position_dirty = true;
     portEXIT_CRITICAL(&s_lock);
+}
+
+/** @brief 将控制器、增益项和 int16 增益打包为一个离散 UART 命令。 */
+void USART_ESP_SetPidGain(uint8_t controller, uint8_t term, int16_t value)
+{
+    const uint32_t packed = ((uint32_t)(uint16_t)value << 16U)
+        | ((uint32_t)term << 8U) | (uint32_t)controller;
+    USART_ESP_queue_control(MOTOR_UART_CMD_SET_PID_GAIN, (int32_t)packed);
 }
 
 /** @brief 排队一个 UART 电机启动命令。 */
