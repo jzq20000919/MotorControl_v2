@@ -37,6 +37,9 @@ rules.ninja
 /ESP_HMI/sdkconfig.ci
 /ESP_HMI/.cache/
 
+# ---------- Qt desktop build output ----------
+/QtMqttSimpleControl/build/
+
 # Keep ESP-IDF reproducibility/configuration files
 !/ESP_HMI/sdkconfig
 !/ESP_HMI/sdkconfig.defaults
