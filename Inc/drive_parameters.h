@@ -111,9 +111,6 @@
 #define PID_POSITION_ANGLE_STEP             10.0
 #define PID_POSITION_MOV_DURATION           10.0
 
-/* Direct-torque position-loop output limit requested for the combined build. */
-#define POSITION_MAX_CURRENT_A              2.0F
-
 /**************************    FIRMWARE PROTECTIONS SECTION   *****************/
 #define OV_VOLTAGE_THRESHOLD_V              24.0 /*!< Over-voltage threshold */
 #define UD_VOLTAGE_THRESHOLD_V              8 /*!< Under-voltage threshold */
