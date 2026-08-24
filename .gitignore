@@ -1,3 +1,83 @@
-build
+# ============================================================
+# MotorControl_v2
+# STM32G431 / MCSDK / CMake / Ninja + ESP32-S3 / ESP-IDF
+# ============================================================
+
+# ---------- STM32 / CMake build output ----------
+/build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+compile_commands.json
+.ninja_deps
+.ninja_log
+build.ninja
+rules.ninja
+
+# Firmware / linker output
+*.elf
+*.axf
+*.hex
+*.bin
+*.map
+*.lst
+*.o
+*.obj
+*.a
+*.lib
+*.d
+*.su
+
+# ---------- ESP-IDF build output ----------
+/ESP_HMI/build/
+/ESP_HMI/managed_components/
+/ESP_HMI/sdkconfig.old
+/ESP_HMI/sdkconfig.ci
+/ESP_HMI/.cache/
+
+# Keep ESP-IDF reproducibility/configuration files
+!/ESP_HMI/sdkconfig
+!/ESP_HMI/sdkconfig.defaults
+!/ESP_HMI/dependencies.lock
+!/ESP_HMI/partitions.csv
+
+# ---------- STM32Cube / STM32CubeIDE temporary files ----------
 mx.scratch
-!.settings
+*.launch
+*.log
+*.bak
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# Keep project metadata used by the current STM32 tooling
+!.settings/
+!.mxproject
+!*.ioc
+
+# ---------- VS Code / clangd local cache ----------
+.cache/
+.clangd/
+.vscode/.browse.c_cpp.db*
+.vscode/ipch/
+**/.vscode/.browse.c_cpp.db*
+**/.vscode/ipch/
+
+# ---------- OS / editor junk ----------
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ---------- Python helper scripts / tooling caches ----------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# ---------- Misc generated files ----------
+*.gcda
+*.gcno
+*.gcov
