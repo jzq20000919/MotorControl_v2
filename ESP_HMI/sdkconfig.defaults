@@ -1,0 +1,7 @@
+# The complete motor HMI is constructed from app_main before the backlight is
+# enabled. LVGL object/style creation and touch initialization need more than
+# the ESP-IDF default 3584-byte main-task stack.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=12288
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

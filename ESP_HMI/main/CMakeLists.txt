@@ -1,0 +1,38 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "bsp/board_touch.c"
+        "bsp/bsp_lcd.c"
+        "bsp/bsp_xl9555.c"
+        "comm/can_ESP.c"
+        "comm/usart_ESP.c"
+        "comm/comm_mgr_ESP.c"
+        "network/wifi_manager.c"
+        "network/mqtt_manager.c"
+        "network/mqtt_motor_gateway.c"
+        "ui/motor_ui.c"
+        "ui/motor_ui_events.c"
+        "ui/motor_ui_style.c"
+
+    INCLUDE_DIRS
+        "."
+        "bsp"
+        "comm"
+        "network"
+        "ui"
+
+    PRIV_REQUIRES
+        esp_lcd
+        esp_driver_gpio
+        esp_driver_i2c
+        esp_driver_uart
+        esp_driver_twai
+        esp_event
+        esp_netif
+        esp_wifi
+        esp_timer
+        esp_lvgl_port
+        espressif__mqtt
+        lvgl
+        nvs_flash
+)
