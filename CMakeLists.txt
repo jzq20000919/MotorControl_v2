@@ -49,7 +49,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     User/can_STM.c
     User/usart_STM.c
     User/mcp_STM.c
-    Drivers/STM32G4xx_HAL_Driver/Src/stm32g4xx_hal_fdcan.c
 )
 
 # Add include paths
@@ -59,7 +58,7 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
-    HAL_FDCAN_MODULE_ENABLED
+    # Add user defined symbols
 )
 
 # Remove wrong libob.a library dependency when using cpp files

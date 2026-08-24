@@ -12,14 +12,15 @@
 #include "motor_uart_protocol.h"
 #include "stm32g4xx_hal.h"
 
+extern UART_HandleTypeDef huart3;          /**< CubeMX 生成并初始化的 USART3 句柄。 */
+extern DMA_HandleTypeDef hdma_usart3_rx;   /**< CubeMX 生成的 USART3 循环接收 DMA 句柄。 */
+
 #define MOTOR_UART_LINK_TIMEOUT_MS       (300U)
 #define MOTOR_UART_TELEMETRY_PERIOD_MS   (20U)
 #define MOTOR_UART_RX_DMA_SIZE             (128U)
 
 typedef struct
 {
-  UART_HandleTypeDef handle;
-  DMA_HandleTypeDef rxDma;
   uint8_t rxDmaBuffer[MOTOR_UART_RX_DMA_SIZE];
   uint16_t rxTail;
   uint8_t parser[MOTOR_UART_MAX_FRAME_SIZE];
@@ -169,10 +170,10 @@ static void USART_STM_ParseByte(uint8_t byte)
 }
 
 /** @brief 根据 DMA 剩余计数读取循环缓冲区新增字节，并逐字节解析。 */
-static void MotorUart_ReadDma(void)
+static void USART_STM_ReadDma(void)
 {
   const uint16_t head = (uint16_t)(
-    MOTOR_UART_RX_DMA_SIZE - __HAL_DMA_GET_COUNTER(&motorUart.rxDma));
+    MOTOR_UART_RX_DMA_SIZE - __HAL_DMA_GET_COUNTER(&hdma_usart3_rx));
 
   while (motorUart.rxTail != head)
   {
@@ -218,9 +219,9 @@ static void USART_STM_SendTelemetry(void)
   MotorUart_WriteU16(&frame[30], USART_STM_Crc16(&frame[2], 28U));
   motorUart.telemetryAttempts++;
   const HAL_StatusTypeDef status =
-    HAL_UART_Transmit(&motorUart.handle, frame, sizeof(frame), 2U);
+    HAL_UART_Transmit(&huart3, frame, sizeof(frame), 2U);
   motorUart.lastTxStatus = (uint8_t)status;
-  motorUart.uartError = HAL_UART_GetError(&motorUart.handle);
+  motorUart.uartError = HAL_UART_GetError(&huart3);
   if (status == HAL_OK)
   {
     motorUart.telemetrySent++;
@@ -231,59 +232,21 @@ static void USART_STM_SendTelemetry(void)
   }
 }
 
-/** @brief 初始化 USART3 与 DMA1 Channel3 循环接收，保留 USART2 给 ASPEP/MCP。 */
+/**
+ * @brief 在 CubeMX 已初始化的 USART3 上启动循环 DMA 接收。
+ * @note 波特率、PC10/PC11、DMA1 Channel3 和 FIFO 设置全部由 CubeMX 管理。
+ */
 bool USART_STM_Init(void)
 {
-  GPIO_InitTypeDef gpio = {0};
   memset(&motorUart, 0, sizeof(motorUart));
-  __HAL_RCC_GPIOC_CLK_ENABLE();
-  __HAL_RCC_USART3_CLK_ENABLE();
-  __HAL_RCC_DMA1_CLK_ENABLE();
-  gpio.Pin = GPIO_PIN_10 | GPIO_PIN_11;
-  gpio.Mode = GPIO_MODE_AF_PP;
-  gpio.Pull = GPIO_NOPULL;
-  gpio.Speed = GPIO_SPEED_FREQ_HIGH;
-  gpio.Alternate = GPIO_AF7_USART3;
-  HAL_GPIO_Init(GPIOC, &gpio);
-  motorUart.handle.Instance = USART3;
-  motorUart.handle.Init.BaudRate = MOTOR_UART_BAUD_RATE;
-  motorUart.handle.Init.WordLength = UART_WORDLENGTH_8B;
-  motorUart.handle.Init.StopBits = UART_STOPBITS_1;
-  motorUart.handle.Init.Parity = UART_PARITY_NONE;
-  motorUart.handle.Init.Mode = UART_MODE_TX_RX;
-  motorUart.handle.Init.HwFlowCtl = UART_HWCONTROL_NONE;
-  motorUart.handle.Init.OverSampling = UART_OVERSAMPLING_16;
-  motorUart.handle.Init.OneBitSampling = UART_ONE_BIT_SAMPLE_DISABLE;
-  motorUart.handle.Init.ClockPrescaler = UART_PRESCALER_DIV1;
-  motorUart.handle.AdvancedInit.AdvFeatureInit = UART_ADVFEATURE_NO_INIT;
-  motorUart.initStage = 1U;
-  motorUart.lastTxStatus = (uint8_t)HAL_UART_Init(&motorUart.handle);
+  motorUart.initStage = 6U;
+  motorUart.lastTxStatus = (uint8_t)HAL_UART_Receive_DMA(
+    &huart3, motorUart.rxDmaBuffer, MOTOR_UART_RX_DMA_SIZE);
   if (motorUart.lastTxStatus != (uint8_t)HAL_OK)
   {
-    motorUart.uartError = HAL_UART_GetError(&motorUart.handle);
+    motorUart.uartError = HAL_UART_GetError(&huart3);
     return false;
   }
-  motorUart.initStage = 2U;
-  if (HAL_UARTEx_SetTxFifoThreshold(&motorUart.handle, UART_TXFIFO_THRESHOLD_1_8) != HAL_OK) return false;
-  motorUart.initStage = 3U;
-  if (HAL_UARTEx_SetRxFifoThreshold(&motorUart.handle, UART_RXFIFO_THRESHOLD_1_8) != HAL_OK) return false;
-  motorUart.initStage = 4U;
-  if (HAL_UARTEx_DisableFifoMode(&motorUart.handle) != HAL_OK) return false;
-  motorUart.rxDma.Instance = DMA1_Channel3;
-  motorUart.rxDma.Init.Request = DMA_REQUEST_USART3_RX;
-  motorUart.rxDma.Init.Direction = DMA_PERIPH_TO_MEMORY;
-  motorUart.rxDma.Init.PeriphInc = DMA_PINC_DISABLE;
-  motorUart.rxDma.Init.MemInc = DMA_MINC_ENABLE;
-  motorUart.rxDma.Init.PeriphDataAlignment = DMA_PDATAALIGN_BYTE;
-  motorUart.rxDma.Init.MemDataAlignment = DMA_MDATAALIGN_BYTE;
-  motorUart.rxDma.Init.Mode = DMA_CIRCULAR;
-  motorUart.rxDma.Init.Priority = DMA_PRIORITY_HIGH;
-  motorUart.initStage = 5U;
-  if (HAL_DMA_Init(&motorUart.rxDma) != HAL_OK) return false;
-  __HAL_LINKDMA(&motorUart.handle, hdmarx, motorUart.rxDma);
-  motorUart.initStage = 6U;
-  if (HAL_UART_Receive_DMA(&motorUart.handle, motorUart.rxDmaBuffer,
-                           MOTOR_UART_RX_DMA_SIZE) != HAL_OK) return false;
   motorUart.nextTelemetryTick = HAL_GetTick() + MOTOR_UART_TELEMETRY_PERIOD_MS;
   motorUart.initialized = true;
   motorUart.initStage = 7U;
@@ -294,12 +257,11 @@ bool USART_STM_Init(void)
 void USART_STM_Process(void)
 {
   if (!motorUart.initialized) return;
-  MotorUart_ReadDma();
+  USART_STM_ReadDma();
   const uint32_t now = HAL_GetTick();
   /*
-   * Emit the same startup telemetry as the proven 2804 implementation.  The
-   * LINK_ACTIVE bit still remains clear until a valid ESP32 command arrives,
-   * but ESP32 RX can now distinguish a missing return wire from a bad command.
+   * 保留已验证工程的上电遥测行为。收到有效 ESP32 命令前，LINK_ACTIVE 位仍为 0，
+   * 但 ESP32 接收端可以据此区分回传线路缺失与命令内容错误。
    */
   if ((int32_t)(now - motorUart.nextTelemetryTick) >= 0)
   {

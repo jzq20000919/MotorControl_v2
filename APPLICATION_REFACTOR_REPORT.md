@@ -31,12 +31,12 @@ CAN_ESP  USART_ESP
 - `User/motor_types_STM.h`：统一控制模式与电机状态快照。
 - `User/motor_mgr_STM.*`：唯一允许直接调用电机控制 MCSDK API 的应用模块。
 - `User/comm_mgr_STM.*`：三个通信适配器的统一命令入口与周期调度入口。
-- `User/can_STM.*`：FDCAN1、Bus-Off 恢复、CAN 命令和三类遥测帧。
-- `User/usart_STM.*`：USART3、循环 RX DMA、CRC、命令和遥测帧。
+- `User/can_STM.*`：复用 CubeMX 的 FDCAN1 句柄，负责应用过滤器、Bus-Off 恢复、CAN 命令和三类遥测帧。
+- `User/usart_STM.*`：复用 CubeMX 的 USART3/DMA 句柄，负责循环 RX DMA 启动、CRC、命令和遥测帧。
 - `User/mcp_STM.*`：MCP 用户回调和固定 88 字节 Qt 遥测。
 - `User/motor_can_protocol.h`、`User/motor_uart_protocol.h`：双方共用协议。
 
-根 `CMakeLists.txt` 显式列出上述源文件，并补充 FDCAN HAL 源文件和 `HAL_FDCAN_MODULE_ENABLED`；未修改生成目录中的 `cmake/stm32cubemx/CMakeLists.txt`。
+根 `CMakeLists.txt` 只显式列出上述应用层源文件。FDCAN HAL 源文件、模块宏、USART3、DMA、GPIO 和外设时钟均由 CubeMX 生成代码及 `cmake/stm32cubemx/CMakeLists.txt` 管理，应用层不再重复配置。
 
 ## 保留的已验证行为
 
