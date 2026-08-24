@@ -1572,15 +1572,13 @@ __weak void *R3_2_TIMx_UP_IRQHandler(PWMC_R3_2_Handle_t *pHandle)
     OPAMP_TypeDef *operationAmp;
     uint32_t OpampConfig;
 
-    /* In dual drive use case with shared ADC: wait for both ADCs end of sequence conversion before writing a new one */
-    if ((0x0u != pHandle->pParams_str->ADCDataReg1[0]->JSQR) || (0x0u != pHandle->pParams_str->ADCDataReg2[0]->JSQR))
-    {  
-      while (0x0u != pHandle->pParams_str->ADCDataReg1[0]->JSQR)
-      {
-        /* Nothing to do */
-      }
-    }
-    
+    /*
+     * This project is a single-drive application. Do not wait for a previous
+     * injected ADC context here: TIMx TRGO is reset until the code below
+     * programs the next context and re-enables it, so waiting for JSQR to
+     * become zero can deadlock this ISR and starve the CAN service loop.
+     */
+
     if (OPAMPParams != NULL)
     {
       /* We need to manage the Operational amplifier internal output enable - Dedicated to G4 and the VPSEL selection */
