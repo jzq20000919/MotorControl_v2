@@ -19,6 +19,7 @@
 #include <QSettings>
 #include <QSpinBox>
 #include <QStandardPaths>
+#include <QStringList>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -148,7 +149,7 @@ MainWindow::MainWindow(QWidget *parent)
     auto *testForm = new QFormLayout(testGroup);
     auto *localTestHint = new QLabel(
         tr("请在 ESP32 的 PID TEST 页面启动速度或位置测试。Qt 仅接收测试状态、"
-           "重组上传数据并保存 PNG。"), testGroup);
+           "重组上传数据并保存 PNG 分析报告与同名 CSV。"), testGroup);
     localTestHint->setWordWrap(true);
     testForm->addRow(tr("启动方式"), localTestHint);
 
@@ -164,13 +165,13 @@ MainWindow::MainWindow(QWidget *parent)
     testForm->addRow(tr("测试状态"), testStatusRow);
     root->addWidget(testGroup);
 
-    auto *fileGroup = new QGroupBox(tr("测试图像文件"), central);
+    auto *fileGroup = new QGroupBox(tr("测试报告文件"), central);
     auto *fileLayout = new QGridLayout(fileGroup);
     outputFolderEdit_ = new QLineEdit(defaultOutputFolder(), fileGroup);
     outputFolderEdit_->setReadOnly(true);
     browseOutputButton_ = new QPushButton(tr("选择文件夹"), fileGroup);
     openOutputButton_ = new QPushButton(tr("打开文件夹"), fileGroup);
-    lastFileLabel_ = new QLabel(tr("尚未生成测试图像"), fileGroup);
+    lastFileLabel_ = new QLabel(tr("尚未生成测试报告"), fileGroup);
     lastFileLabel_->setTextInteractionFlags(Qt::TextSelectableByMouse);
     lastFileLabel_->setWordWrap(true);
     fileLayout->addWidget(outputFolderEdit_, 0, 0);
@@ -269,7 +270,7 @@ void MainWindow::emergencyStop()
 void MainWindow::saveTestImage(const QString &resultText)
 {
     if (samples_.isEmpty()) {
-        lastFileLabel_->setText(tr("没有采样数据，未生成图像"));
+        lastFileLabel_->setText(tr("没有采样数据，未生成测试报告"));
         return;
     }
     const QString folder = outputFolderEdit_->text();
@@ -279,20 +280,37 @@ void MainWindow::saveTestImage(const QString &resultText)
     }
     const QString modeName = testMode_ == MotorControlMode::Speed
         ? QStringLiteral("speed") : QStringLiteral("position");
-    const QString fileName = QStringLiteral("%1_pid_test_%2.png")
+    const QString baseName = QStringLiteral("%1_pid_test_%2")
         .arg(modeName,
              QDateTime::currentDateTime().toString(
                  QStringLiteral("yyyyMMdd_HHmmss_zzz")));
-    const QString filePath = QDir(folder).filePath(fileName);
-    QString error;
-    if (!MotorPlotRenderer::savePng(samples_, testMode_,
-                                    pidSummary(), filePath, &error)) {
-        lastFileLabel_->setText(tr("图像保存失败：%1").arg(error));
+    const QString pngPath = QDir(folder).filePath(
+        baseName + QStringLiteral(".png"));
+    const QString csvPath = QDir(folder).filePath(
+        baseName + QStringLiteral(".csv"));
+    QString pngError;
+    QString csvError;
+    const bool pngSaved = MotorPlotRenderer::savePng(
+        samples_, testMode_, pidSummary(), pngPath, &pngError);
+    const bool csvSaved = MotorPlotRenderer::saveCsv(
+        samples_, csvPath, &csvError);
+    if (!pngSaved || !csvSaved) {
+        QStringList errors;
+        if (!pngSaved) {
+            errors.append(tr("PNG：%1").arg(pngError));
+        }
+        if (!csvSaved) {
+            errors.append(tr("CSV：%1").arg(csvError));
+        }
+        lastFileLabel_->setText(
+            tr("测试报告保存不完整：%1").arg(errors.join(QStringLiteral("；"))));
         return;
     }
     lastFileLabel_->setText(
-        tr("%1：%2（%3 个采样点）")
-            .arg(resultText, QDir::toNativeSeparators(filePath))
+        tr("%1：%2；%3（%4 个原始采样点）")
+            .arg(resultText,
+                 QDir::toNativeSeparators(pngPath),
+                 QDir::toNativeSeparators(csvPath))
             .arg(samples_.size()));
 }
 
@@ -679,7 +697,7 @@ QString MainWindow::pidSummary() const
 void MainWindow::chooseOutputFolder()
 {
     const QString folder = QFileDialog::getExistingDirectory(
-        this, tr("选择测试图像保存文件夹"), outputFolderEdit_->text());
+        this, tr("选择测试报告保存文件夹"), outputFolderEdit_->text());
     if (!folder.isEmpty()) {
         outputFolderEdit_->setText(QDir::toNativeSeparators(folder));
     }
