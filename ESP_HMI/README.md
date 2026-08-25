@@ -32,11 +32,15 @@ ESP32 新增 `PID TEST` 本地页面。页面显示当前缓存的速度、位�
 状态机。MQTT `run_test` 不再启动测试。
 
 STM32 每 2 ms 发送 0x180、0x181、0x182 三帧完整遥测。ESP32 以 0x182
-到达时间作为一组完成样本的时间戳。每次测试开始前优先从 PSRAM、其次从内部
-RAM 分配 3600 组紧凑样本（约 57.6 KiB）；分配失败时不会启动电机。停止后通过
+到达时间作为一组完成样本的时间戳。每次测试开始前只从 PSRAM 分配 3600 组
+紧凑样本（约 57.6 KiB），不会回退占用内部 RAM；PSRAM 分配失败时不会启动电机。停止后通过
 `motor/control/test/data` 以 QoS 1 二进制分块回传，通过
 `motor/control/test/status` 发布阶段、点数和实际平均采样周期。2 ms 周期在
 500 kbit/s 经典 CAN 下给控制命令、重发和仲裁保留了总线余量。
+
+DNESP32S3B 的 N16R8 兼容模组使用 8 MB Octal PSRAM。工程在 `sdkconfig` 和
+`sdkconfig.defaults` 中启用 80 MHz Octal PSRAM、启动初始化、内存测试和
+`heap_caps` 分配。网关初始化时会在串口终端打印 PSRAM 总容量和剩余容量。
 
 测试运行期间暂停周期 `motor/control/telemetry` 发布；数据回传按 50 ms/块
 节流，防止 MQTT outbox 和 Wi-Fi 发送缓冲区被突发数据塞满。

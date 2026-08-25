@@ -517,7 +517,7 @@ static void mqtt_gateway_service_test(void)
             break;
         }
         if (!mqtt_gateway_record_sample(&snapshot)) {
-            mqtt_gateway_fail_test("RAM sample buffer overflow");
+            mqtt_gateway_fail_test("PSRAM sample buffer overflow");
             break;
         }
         if (s_test.sample_count > 0U &&
@@ -526,7 +526,7 @@ static void mqtt_gateway_service_test(void)
             s_test.stage = MQTT_TEST_STOPPING;
             s_test.deadline_us = now_us + MQTT_GATEWAY_TEST_STOP_TIMEOUT_US;
         } else if (s_test.sample_count >= MQTT_GATEWAY_TEST_MAX_SAMPLES) {
-            mqtt_gateway_fail_test("RAM sample buffer overflow");
+            mqtt_gateway_fail_test("PSRAM sample buffer overflow");
         } else if (now_us >= s_test.deadline_us) {
             mqtt_gateway_fail_test("CAN sampling timed out");
         }
@@ -592,11 +592,42 @@ static mqtt_test_sample_t *mqtt_gateway_allocate_test_samples(void)
         sizeof(mqtt_test_sample_t);
     mqtt_test_sample_t *samples = heap_caps_malloc(
         bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (samples == NULL) {
-        samples = heap_caps_malloc(
-            bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (samples != NULL) {
+        return samples;
     }
-    return samples;
+
+    const size_t total_bytes =
+        heap_caps_get_total_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const size_t free_bytes =
+        heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const size_t largest_block =
+        heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+    if (total_bytes == 0U) {
+        ESP_LOGE(TAG,
+                 "PSRAM allocation failed: PSRAM is not initialized, not "
+                 "registered with the heap, or disabled in sdkconfig; "
+                 "required=%zu bytes, total=%zu, free=%zu, largest=%zu",
+                 bytes, total_bytes, free_bytes, largest_block);
+    } else if (free_bytes < bytes) {
+        ESP_LOGE(TAG,
+                 "PSRAM allocation failed: insufficient free PSRAM; "
+                 "required=%zu bytes, total=%zu, free=%zu, largest=%zu",
+                 bytes, total_bytes, free_bytes, largest_block);
+    } else if (largest_block < bytes) {
+        ESP_LOGE(TAG,
+                 "PSRAM allocation failed: PSRAM heap is fragmented and no "
+                 "contiguous block is large enough; required=%zu bytes, "
+                 "total=%zu, free=%zu, largest=%zu",
+                 bytes, total_bytes, free_bytes, largest_block);
+    } else {
+        ESP_LOGE(TAG,
+                 "PSRAM allocation failed despite sufficient reported heap; "
+                 "check PSRAM/heap integrity and allocation capabilities; "
+                 "required=%zu bytes, total=%zu, free=%zu, largest=%zu",
+                 bytes, total_bytes, free_bytes, largest_block);
+    }
+    return NULL;
 }
 
 static void mqtt_gateway_start_test(
@@ -655,14 +686,14 @@ static void mqtt_gateway_start_test(
     mqtt_test_sample_t *samples = mqtt_gateway_allocate_test_samples();
     if (samples == NULL) {
         mqtt_gateway_publish_ack(command_id, false,
-                                 "Test RAM allocation failed");
+                                 "Test PSRAM allocation failed");
         (void)mqtt_gateway_publish_test_status_for(
             command_id,
             mode == 0 ? COMM_MGR_ESP_MODE_SPEED
                       : COMM_MGR_ESP_MODE_POSITION,
-            0U, 0U, "error", "Test RAM allocation failed");
+            0U, 0U, "error", "Test PSRAM allocation failed");
         mqtt_gateway_update_test_snapshot(
-            MQTT_MOTOR_TEST_UI_ERROR, "Test RAM allocation failed");
+            MQTT_MOTOR_TEST_UI_ERROR, "Test PSRAM allocation failed");
         return;
     }
 
@@ -982,7 +1013,19 @@ esp_err_t mqtt_motor_gateway_init(void)
         s_command_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
-    ESP_LOGI(TAG,
-             "MQTT motor test gateway ready; RAM buffer allocated per test");
+    const size_t psram_total =
+        heap_caps_get_total_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    const size_t psram_free =
+        heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (psram_total == 0U) {
+        ESP_LOGE(TAG,
+                 "MQTT motor test gateway ready, but PSRAM is unavailable; "
+                 "check boot log and CONFIG_SPIRAM settings");
+    } else {
+        ESP_LOGI(TAG,
+                 "MQTT motor test gateway ready; PSRAM total=%zu bytes, "
+                 "free=%zu bytes; test buffer allocated from PSRAM per test",
+                 psram_total, psram_free);
+    }
     return ESP_OK;
 }
