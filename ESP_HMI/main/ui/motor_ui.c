@@ -8,6 +8,7 @@
 
 #include "board_keys.h"
 #include "mqtt_manager.h"
+#include "mqtt_motor_gateway.h"
 #include "comm_mgr_ESP.h"
 #include "motor_ui_events.h"
 #include "motor_ui_style.h"
@@ -26,6 +27,7 @@ static const char *s_page_names[UI_PAGE_COUNT] = {
     "CAN",
     "WI-FI",
     "MQTT",
+    "PID TEST",
     "SPEED",
     "POSITION",
 };
@@ -66,6 +68,11 @@ static lv_obj_t *s_mqtt_uri_textarea;
 static lv_obj_t *s_mqtt_page_state_label;
 static lv_obj_t *s_mqtt_rx_label;
 static lv_obj_t *s_mqtt_keyboard;
+static lv_obj_t *s_pid_test_pid_label;
+static lv_obj_t *s_pid_test_config_label;
+static lv_obj_t *s_pid_test_state_label;
+static lv_obj_t *s_pid_speed_test_button;
+static lv_obj_t *s_pid_position_test_button;
 static lv_obj_t *s_stop_button;
 static lv_obj_t *s_speed_stop_button;
 static lv_obj_t *s_position_stop_button;
@@ -99,6 +106,7 @@ static bool s_page_animating;
 static uint32_t s_wifi_revision = UINT32_MAX;
 static uint32_t s_wifi_scan_generation = UINT32_MAX;
 static uint32_t s_mqtt_revision = UINT32_MAX;
+static uint32_t s_pid_test_revision = UINT32_MAX;
 static uint16_t s_wifi_network_count;
 static bool s_wifi_network_secured[WIFI_MANAGER_MAX_APS];
 static char s_wifi_network_ssids[WIFI_MANAGER_MAX_APS]
@@ -378,8 +386,9 @@ static void ui_create_navigation_page(lv_obj_t *parent)
     ui_create_navigation_button(list, "CAN", UI_PAGE_CAN, 85);
     ui_create_navigation_button(list, "WI-FI", UI_PAGE_WIFI, 127);
     ui_create_navigation_button(list, "MQTT", UI_PAGE_MQTT, 169);
-    ui_create_navigation_button(list, "SPEED CONTROL", UI_PAGE_SPEED, 211);
-    ui_create_navigation_button(list, "POSITION CONTROL", UI_PAGE_POSITION, 253);
+    ui_create_navigation_button(list, "PID TEST", UI_PAGE_PID_TEST, 211);
+    ui_create_navigation_button(list, "SPEED CONTROL", UI_PAGE_SPEED, 253);
+    ui_create_navigation_button(list, "POSITION CONTROL", UI_PAGE_POSITION, 295);
 }
 
 /** @brief 创建实时电机反馈/状态页面及其数值标签。 */
@@ -634,6 +643,66 @@ static void ui_create_mqtt_page(lv_obj_t *parent)
     motor_ui_style_keyboard(s_mqtt_keyboard);
     lv_obj_add_event_cb(s_mqtt_keyboard, motor_ui_mqtt_keyboard_event, LV_EVENT_ALL, NULL);
     lv_obj_add_flag(s_mqtt_keyboard, LV_OBJ_FLAG_HIDDEN);
+}
+
+/** @brief 创建由 ESP32 本地启动、MQTT 仅负责上传的 PID 测试页面。 */
+static void ui_create_pid_test_page(lv_obj_t *parent)
+{
+    lv_obj_t *title = ui_create_label(
+        parent, "PID TEST", UI_COLOR_TEXT, &lv_font_montserrat_14);
+    lv_obj_set_pos(title, 8, 2);
+
+    s_pid_test_pid_label = ui_create_label(
+        parent,
+        "SPD 2144/5    POS 48/4/8\n"
+        "Iq 3633/2693  Id 3633/2693",
+        UI_COLOR_TEXT, &lv_font_montserrat_12);
+    lv_obj_set_pos(s_pid_test_pid_label, 8, 22);
+
+    s_pid_test_config_label = ui_create_label(
+        parent, "7.0 s | 500 RPM | 90.00 deg",
+        UI_COLOR_MUTED, &lv_font_montserrat_12);
+    lv_obj_set_pos(s_pid_test_config_label, 8, 72);
+
+    s_pid_speed_test_button = lv_button_create(parent);
+    lv_obj_set_size(s_pid_speed_test_button, 148, 42);
+    lv_obj_set_pos(s_pid_speed_test_button, 8, 92);
+    motor_ui_style_button(s_pid_speed_test_button, UI_COLOR_BLUE, 10);
+    lv_obj_add_event_cb(
+        s_pid_speed_test_button, motor_ui_pid_speed_test_event,
+        LV_EVENT_CLICKED, NULL);
+    lv_obj_t *label = ui_create_label(
+        s_pid_speed_test_button, "SPEED CONTROL",
+        UI_COLOR_TEXT, &lv_font_montserrat_12);
+    lv_obj_center(label);
+
+    s_pid_position_test_button = lv_button_create(parent);
+    lv_obj_set_size(s_pid_position_test_button, 148, 42);
+    lv_obj_set_pos(s_pid_position_test_button, 164, 92);
+    motor_ui_style_button(s_pid_position_test_button, UI_COLOR_BLUE, 10);
+    lv_obj_add_event_cb(
+        s_pid_position_test_button, motor_ui_pid_position_test_event,
+        LV_EVENT_CLICKED, NULL);
+    label = ui_create_label(
+        s_pid_position_test_button, "POSITION CONTROL",
+        UI_COLOR_TEXT, &lv_font_montserrat_12);
+    lv_obj_center(label);
+
+    lv_obj_t *status_panel = lv_obj_create(parent);
+    lv_obj_set_size(status_panel, 304, 70);
+    lv_obj_set_pos(status_panel, 8, 140);
+    motor_ui_style_panel(status_panel, 8, 6);
+    label = ui_create_label(
+        status_panel, "TEST STATUS", UI_COLOR_MUTED,
+        &lv_font_montserrat_12);
+    lv_obj_set_pos(label, 0, 0);
+    s_pid_test_state_label = ui_create_label(
+        status_panel, "READY", UI_COLOR_GREEN,
+        &lv_font_montserrat_14);
+    lv_obj_set_pos(s_pid_test_state_label, 0, 20);
+    lv_obj_set_width(s_pid_test_state_label, 286);
+    lv_label_set_long_mode(
+        s_pid_test_state_label, LV_LABEL_LONG_WRAP);
 }
 
 /** @brief 创建速度模式控制、滑块及当前目标标签。 */
@@ -963,6 +1032,71 @@ static void ui_update_mqtt_data(void)
     s_mqtt_revision = snapshot.revision;
 }
 
+/** @brief 刷新本地测试页的运行时 PID、测试阶段和按钮可用状态。 */
+static void ui_update_pid_test_data(void)
+{
+    mqtt_motor_test_snapshot_t snapshot;
+    mqtt_motor_gateway_get_test_snapshot(&snapshot);
+    if (snapshot.revision == s_pid_test_revision) {
+        return;
+    }
+
+    lv_label_set_text_fmt(
+        s_pid_test_pid_label,
+        "SPD %d/%d    POS %d/%d/%d\nIq %d/%d  Id %d/%d",
+        snapshot.pid[0][0], snapshot.pid[0][1],
+        snapshot.pid[1][0], snapshot.pid[1][1], snapshot.pid[1][2],
+        snapshot.pid[2][0], snapshot.pid[2][1],
+        snapshot.pid[3][0], snapshot.pid[3][1]);
+    lv_label_set_text_fmt(
+        s_pid_test_config_label,
+        "%lu.%01lu s | %d RPM | %u.%02u deg",
+        (unsigned long)(snapshot.duration_ms / 1000U),
+        (unsigned long)((snapshot.duration_ms % 1000U) / 100U),
+        MQTT_MOTOR_LOCAL_SPEED_TARGET_RPM,
+        MQTT_MOTOR_LOCAL_POSITION_TARGET_CDEG / 100U,
+        MQTT_MOTOR_LOCAL_POSITION_TARGET_CDEG % 100U);
+
+    const bool busy =
+        snapshot.state == MQTT_MOTOR_TEST_UI_TESTING ||
+        snapshot.state == MQTT_MOTOR_TEST_UI_UPLOADING;
+    if (busy) {
+        lv_obj_add_state(s_pid_speed_test_button, LV_STATE_DISABLED);
+        lv_obj_add_state(s_pid_position_test_button, LV_STATE_DISABLED);
+    } else {
+        lv_obj_remove_state(s_pid_speed_test_button, LV_STATE_DISABLED);
+        lv_obj_remove_state(s_pid_position_test_button, LV_STATE_DISABLED);
+    }
+
+    const char *state_text = "READY";
+    motor_ui_style_color_t color = UI_COLOR_MUTED;
+    switch (snapshot.state) {
+    case MQTT_MOTOR_TEST_UI_TESTING:
+        state_text = "TESTING";
+        color = UI_COLOR_YELLOW;
+        break;
+    case MQTT_MOTOR_TEST_UI_UPLOADING:
+        state_text = "TEST COMPLETE - UPLOADING";
+        color = UI_COLOR_CYAN;
+        break;
+    case MQTT_MOTOR_TEST_UI_UPLOAD_SUCCESS:
+        state_text = "UPLOAD SUCCESS";
+        color = UI_COLOR_GREEN;
+        break;
+    case MQTT_MOTOR_TEST_UI_ERROR:
+        state_text = snapshot.message[0] != '\0'
+            ? snapshot.message : "TEST ERROR";
+        color = UI_COLOR_RED;
+        break;
+    case MQTT_MOTOR_TEST_UI_IDLE:
+    default:
+        break;
+    }
+    lv_label_set_text(s_pid_test_state_label, state_text);
+    motor_ui_style_set_text_color(s_pid_test_state_label, color);
+    s_pid_test_revision = snapshot.revision;
+}
+
 /**
  * @brief LVGL 周期定时器回调：刷新电机、Wi-Fi 与 MQTT 页面。
  * @param timer LVGL 定时器对象；全部 UI 状态均为模块级变量，因此未使用该参数。
@@ -973,6 +1107,7 @@ static void ui_timer_callback(lv_timer_t *timer)
     ui_update_motor_data();
     ui_update_wifi_data();
     ui_update_mqtt_data();
+    ui_update_pid_test_data();
 }
 
 /** @brief 专用于按键轮询和去抖的 LVGL 周期定时器回调。 */
@@ -1040,6 +1175,7 @@ void motor_ui_create(lv_display_t *display)
     ui_create_can_page(s_pages[UI_PAGE_CAN]);
     ui_create_wifi_page(s_pages[UI_PAGE_WIFI]);
     ui_create_mqtt_page(s_pages[UI_PAGE_MQTT]);
+    ui_create_pid_test_page(s_pages[UI_PAGE_PID_TEST]);
     ui_create_speed_page(s_pages[UI_PAGE_SPEED]);
     ui_create_position_page(s_pages[UI_PAGE_POSITION]);
 
@@ -1055,6 +1191,7 @@ void motor_ui_create(lv_display_t *display)
         .mqtt_uri_textarea = s_mqtt_uri_textarea,
         .mqtt_page_state_label = s_mqtt_page_state_label,
         .mqtt_keyboard = s_mqtt_keyboard,
+        .pid_test_state_label = s_pid_test_state_label,
         .speed_slider = s_speed_slider,
         .speed_slider_value = s_speed_slider_value,
         .position_slider = s_position_slider,

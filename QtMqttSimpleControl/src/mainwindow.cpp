@@ -17,7 +17,6 @@
 #include <QLineEdit>
 #include <QPushButton>
 #include <QSettings>
-#include <QSlider>
 #include <QSpinBox>
 #include <QStandardPaths>
 #include <QUrl>
@@ -29,7 +28,6 @@ const QString kTelemetryTopic = QStringLiteral("motor/control/telemetry");
 const QString kAckTopic = QStringLiteral("motor/control/ack");
 const QString kTestStatusTopic = QStringLiteral("motor/control/test/status");
 const QString kTestDataTopic = QStringLiteral("motor/control/test/data");
-constexpr int kTestDurationMs = 7000;
 constexpr int kPidControllerCount = 4;
 constexpr int kDefaultPid[kPidControllerCount][3] = {
     {2144, 5, 0},
@@ -65,17 +63,6 @@ MainWindow::MainWindow(QWidget *parent)
     setWindowTitle(tr("MQTT 电机 PID 测试"));
     resize(920, 720);
     setMinimumSize(820, 650);
-
-    testCommandTimeoutTimer_.setSingleShot(true);
-    connect(&testCommandTimeoutTimer_, &QTimer::timeout, this, [this] {
-        if (activeTestId_ == 0U || testState_ == TestState::Idle) {
-            return;
-        }
-        testStateLabel_->setText(
-            tr("ESP32 在 4 秒内未确认测试命令；请检查 Broker、ESP32 MQTT 和 CAN 状态"));
-        statusLabel_->setText(
-            tr("注意：Qt 写入 socket 不代表 ESP32 已收到命令"));
-    });
 
     auto *central = new QWidget(this);
     auto *root = new QVBoxLayout(central);
@@ -157,47 +144,18 @@ MainWindow::MainWindow(QWidget *parent)
     pidLayout->addLayout(pidButtons, 5, 0, 1, 5);
     root->addWidget(pidGroup);
 
-    auto *testGroup = new QGroupBox(tr("7 秒自动跟踪测试"), central);
+    auto *testGroup = new QGroupBox(tr("ESP32 本地 PID 测试接收"), central);
     auto *testForm = new QFormLayout(testGroup);
-
-    auto *speedRow = new QWidget(testGroup);
-    auto *speedLayout = new QHBoxLayout(speedRow);
-    speedLayout->setContentsMargins(0, 0, 0, 0);
-    speedSlider_ = new QSlider(Qt::Horizontal, speedRow);
-    speedSlider_->setRange(-2600, 2600);
-    speedSlider_->setSingleStep(100);
-    speedSlider_->setPageStep(500);
-    speedSlider_->setValue(500);
-    speedValueLabel_ = new QLabel(tr("500 RPM"), speedRow);
-    speedValueLabel_->setMinimumWidth(90);
-    speedValueLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    speedTestButton_ = new QPushButton(tr("速度测试"), speedRow);
-    speedLayout->addWidget(speedSlider_, 1);
-    speedLayout->addWidget(speedValueLabel_);
-    speedLayout->addWidget(speedTestButton_);
-    testForm->addRow(tr("速度目标"), speedRow);
-
-    auto *positionRow = new QWidget(testGroup);
-    auto *positionLayout = new QHBoxLayout(positionRow);
-    positionLayout->setContentsMargins(0, 0, 0, 0);
-    positionSlider_ = new QSlider(Qt::Horizontal, positionRow);
-    positionSlider_->setRange(0, 35999);
-    positionSlider_->setSingleStep(100);
-    positionSlider_->setPageStep(1000);
-    positionSlider_->setValue(9000);
-    positionValueLabel_ = new QLabel(tr("90.00°"), positionRow);
-    positionValueLabel_->setMinimumWidth(90);
-    positionValueLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    positionTestButton_ = new QPushButton(tr("位置测试"), positionRow);
-    positionLayout->addWidget(positionSlider_, 1);
-    positionLayout->addWidget(positionValueLabel_);
-    positionLayout->addWidget(positionTestButton_);
-    testForm->addRow(tr("位置目标"), positionRow);
+    auto *localTestHint = new QLabel(
+        tr("请在 ESP32 的 PID TEST 页面启动速度或位置测试。Qt 仅接收测试状态、"
+           "重组上传数据并保存 PNG。"), testGroup);
+    localTestHint->setWordWrap(true);
+    testForm->addRow(tr("启动方式"), localTestHint);
 
     auto *testStatusRow = new QWidget(testGroup);
     auto *testStatusLayout = new QHBoxLayout(testStatusRow);
     testStatusLayout->setContentsMargins(0, 0, 0, 0);
-    testStateLabel_ = new QLabel(tr("等待测试"), testStatusRow);
+    testStateLabel_ = new QLabel(tr("等待 ESP32 本地测试"), testStatusRow);
     stopButton_ = new QPushButton(tr("立即停止"), testStatusRow);
     stopButton_->setStyleSheet(QStringLiteral(
         "QPushButton{background:#c62828;color:white;padding:7px;}"));
@@ -225,10 +183,6 @@ MainWindow::MainWindow(QWidget *parent)
 
     connect(connectButton_, &QPushButton::clicked,
             this, &MainWindow::toggleConnection);
-    connect(speedTestButton_, &QPushButton::clicked,
-            this, &MainWindow::startSpeedTest);
-    connect(positionTestButton_, &QPushButton::clicked,
-            this, &MainWindow::startPositionTest);
     connect(stopButton_, &QPushButton::clicked,
             this, &MainWindow::emergencyStop);
     connect(applyPidButton_, &QPushButton::clicked,
@@ -241,13 +195,6 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::chooseOutputFolder);
     connect(openOutputButton_, &QPushButton::clicked,
             this, &MainWindow::openOutputFolder);
-    connect(speedSlider_, &QSlider::valueChanged, this, [this](int value) {
-        speedValueLabel_->setText(tr("%1 RPM").arg(value));
-    });
-    connect(positionSlider_, &QSlider::valueChanged, this, [this](int value) {
-        positionValueLabel_->setText(
-            tr("%1°").arg(value / 100.0, 0, 'f', 2));
-    });
     connect(&mqtt_, &MqttClient::connected, this, [this] {
         if (!mqtt_.subscribeQos1(kTelemetryTopic) ||
             !mqtt_.subscribeQos1(kAckTopic) ||
@@ -305,48 +252,6 @@ void MainWindow::toggleConnection()
         .arg(QCoreApplication::applicationPid());
     mqtt_.connectToBroker(
         host, static_cast<quint16>(portSpin_->value()), clientId);
-}
-
-void MainWindow::startSpeedTest()
-{
-    startTest(MotorControlMode::Speed);
-}
-
-void MainWindow::startPositionTest()
-{
-    startTest(MotorControlMode::Position);
-}
-
-void MainWindow::startTest(MotorControlMode mode)
-{
-    if (!mqttConnected_) {
-        testStateLabel_->setText(tr("无法测试：MQTT 未连接"));
-        return;
-    }
-    if (testState_ != TestState::Idle || motorRunning_) {
-        testStateLabel_->setText(tr("请先停止当前电机运行或测试"));
-        return;
-    }
-
-    testMode_ = mode;
-    samples_.clear();
-    receivedSamples_.clear();
-    expectedSampleCount_ = 0U;
-    receivedSampleCount_ = 0U;
-    activeTestId_ = ++nextCommandId_;
-    if (!mqtt_.publishQos1(kCommandTopic,
-                           makeTestCommand(mode, activeTestId_))) {
-        activeTestId_ = 0U;
-        testStateLabel_->setText(tr("测试命令发送失败"));
-        return;
-    }
-    testState_ = TestState::Running;
-    testCommandTimeoutTimer_.start(4000);
-    testStateLabel_->setText(
-        tr("测试命令 #%1 已发送，ESP32 正在控制并缓存 CAN 数据…")
-            .arg(activeTestId_));
-    statusLabel_->setText(tr("测试期间 MQTT 不传输实时曲线数据"));
-    updateControlAvailability();
 }
 
 void MainWindow::emergencyStop()
@@ -415,24 +320,15 @@ void MainWindow::processMqttMessage(const QString &topic,
         const QString message =
             object.value(QStringLiteral("message")).toString();
         statusLabel_->setText(tr("电机网关：%1").arg(message));
-        if (id == activeTestId_) {
-            testCommandTimeoutTimer_.stop();
-        }
         if (id == activeTestId_ && !accepted) {
-            testState_ = TestState::Idle;
-            activeTestId_ = 0U;
             testStateLabel_->setText(tr("测试被拒绝：%1").arg(message));
-            updateControlAvailability();
+            resetTestState();
         }
         return;
     }
     if (topic == kTestStatusTopic) {
         const quint32 id = static_cast<quint32>(
             object.value(QStringLiteral("id")).toInteger());
-        if (id != activeTestId_ || activeTestId_ == 0U) {
-            return;
-        }
-        testCommandTimeoutTimer_.stop();
         const QString stage =
             object.value(QStringLiteral("stage")).toString();
         const QString message =
@@ -442,7 +338,33 @@ void MainWindow::processMqttMessage(const QString &topic,
         const int samplePeriodUs =
             object.value(QStringLiteral("sample_period_us")).toInt();
 
-        if (stage == QStringLiteral("publishing")) {
+        if (activeTestId_ == 0U &&
+            (stage == QStringLiteral("accepted") ||
+             stage == QStringLiteral("recording") ||
+             stage == QStringLiteral("sending") ||
+             stage == QStringLiteral("publishing"))) {
+            samples_.clear();
+            receivedSamples_.clear();
+            expectedSampleCount_ = 0U;
+            receivedSampleCount_ = 0U;
+            activeTestId_ = id;
+            testMode_ = object.value(QStringLiteral("mode")).toInt() == 1
+                ? MotorControlMode::Position : MotorControlMode::Speed;
+            testState_ = stage == QStringLiteral("sending") ||
+                         stage == QStringLiteral("publishing")
+                ? TestState::Receiving : TestState::Running;
+            updateControlAvailability();
+        }
+        if (id != activeTestId_ || activeTestId_ == 0U) {
+            if (stage == QStringLiteral("error")) {
+                testStateLabel_->setText(
+                    tr("ESP32 本地测试失败：%1").arg(message));
+            }
+            return;
+        }
+
+        if (stage == QStringLiteral("sending") ||
+            stage == QStringLiteral("publishing")) {
             testState_ = TestState::Receiving;
             testStateLabel_->setText(
                 tr("测试已停止，ESP32 正在回传 %1 个 CAN 采样点…")
@@ -451,12 +373,10 @@ void MainWindow::processMqttMessage(const QString &topic,
                    stage == QStringLiteral("aborted")) {
             finalizeReceivedTest(stage == QStringLiteral("aborted"), message);
         } else if (stage == QStringLiteral("error")) {
-            testState_ = TestState::Idle;
-            activeTestId_ = 0U;
-            receivedSamples_.clear();
             testStateLabel_->setText(tr("ESP32 测试失败：%1").arg(message));
-            updateControlAvailability();
-        } else {
+            resetTestState();
+        } else if (stage == QStringLiteral("accepted") ||
+                   stage == QStringLiteral("recording")) {
             QString detail = tr("ESP32：%1").arg(message);
             if (sampleCount > 0) {
                 detail += tr("（%1 点，平均 %2 μs）")
@@ -502,7 +422,17 @@ void MainWindow::processTestData(const QByteArray &payload)
     const quint32 startIndex = readU32Le(data + 12);
     const quint16 count = readU16Le(data + 16);
     const quint16 total = readU16Le(data + 18);
-    if (id != activeTestId_ || activeTestId_ == 0U) {
+    if (activeTestId_ == 0U) {
+        activeTestId_ = id;
+        testMode_ = mode;
+        testState_ = TestState::Receiving;
+        samples_.clear();
+        receivedSamples_.clear();
+        expectedSampleCount_ = 0U;
+        receivedSampleCount_ = 0U;
+        updateControlAvailability();
+    }
+    if (id != activeTestId_) {
         return;
     }
     if (total == 0U || startIndex + count > total ||
@@ -570,11 +500,16 @@ void MainWindow::finalizeReceivedTest(bool aborted, const QString &message)
                 .arg(samples_.size())
                 .arg(averageUs, 0, 'f', 1));
     }
+    resetTestState();
+}
+
+void MainWindow::resetTestState()
+{
     testState_ = TestState::Idle;
-    testCommandTimeoutTimer_.stop();
     activeTestId_ = 0U;
     expectedSampleCount_ = 0U;
     receivedSampleCount_ = 0U;
+    samples_.clear();
     receivedSamples_.clear();
     updateControlAvailability();
 }
@@ -586,14 +521,15 @@ void MainWindow::applyPidParameters()
         return;
     }
     if (sendAllPidParameters()) {
-        statusLabel_->setText(tr("当前 PID 已临时下发；不会改写固件默认值"));
+        statusLabel_->setText(
+            tr("当前 PID 已发送至 ESP32 临时缓存；不会改写 STM32 固件默认值"));
     }
 }
 
 bool MainWindow::sendAllPidParameters()
 {
-    if (!mqttConnected_ || !linkActive_) {
-        statusLabel_->setText(tr("MQTT 或 STM32 链路未就绪"));
+    if (!mqttConnected_) {
+        statusLabel_->setText(tr("MQTT 未连接，无法下发 PID"));
         return false;
     }
     if (motorRunning_) {
@@ -618,7 +554,9 @@ bool MainWindow::publishPidCommand(int controller, const PidValues &values)
     object.insert(QStringLiteral("controller"), controller);
     object.insert(QStringLiteral("kp"), values.kp);
     object.insert(QStringLiteral("ki"), values.ki);
-    object.insert(QStringLiteral("kd"), values.kd);
+    if (controller == 1) {
+        object.insert(QStringLiteral("kd"), values.kd);
+    }
     return mqtt_.publishQos1(
         kCommandTopic, QJsonDocument(object).toJson(QJsonDocument::Compact));
 }
@@ -661,11 +599,11 @@ void MainWindow::restoreDefaultPidParameters()
                        QStringLiteral("QtMqttSimpleControl"));
     settings.remove(QStringLiteral("pid"));
     settings.sync();
-    if (mqttConnected_ && linkActive_ && !motorRunning_) {
+    if (mqttConnected_ && !motorRunning_) {
         (void)sendAllPidParameters();
-        statusLabel_->setText(tr("已恢复并临时下发当前工程默认 PID"));
+        statusLabel_->setText(tr("已恢复并缓存当前工程默认 PID"));
     } else {
-        statusLabel_->setText(tr("已恢复工程默认 PID；连接且停机后可临时应用"));
+        statusLabel_->setText(tr("已恢复工程默认 PID；MQTT 连接后可临时应用"));
     }
 }
 
@@ -769,13 +707,13 @@ void MainWindow::setConnected(bool connected, const QString &message)
 {
     mqttConnected_ = connected;
     if (!connected) {
-        testCommandTimeoutTimer_.stop();
         telemetrySeen_ = false;
         linkActive_ = false;
         motorRunning_ = false;
         if (testState_ != TestState::Idle) {
             testStateLabel_->setText(
-                tr("MQTT 已断开；ESP32 会独立完成并停止电机，请重连以接收数据"));
+                tr("MQTT 已断开，本次测试数据可能丢失，请重新测试"));
+            resetTestState();
         }
     }
     hostEdit_->setEnabled(!connected);
@@ -794,10 +732,6 @@ void MainWindow::updateControlAvailability()
 {
     const bool idle = testState_ == TestState::Idle;
     const bool ready = mqttConnected_ && !motorRunning_ && idle;
-    speedTestButton_->setEnabled(ready);
-    positionTestButton_->setEnabled(ready);
-    speedSlider_->setEnabled(idle);
-    positionSlider_->setEnabled(idle);
     applyPidButton_->setEnabled(ready);
     savePidButton_->setEnabled(idle);
     restorePidButton_->setEnabled(idle);
@@ -828,31 +762,6 @@ QByteArray MainWindow::makeCommand(const QString &command, qint64 value)
                   static_cast<qint64>(++nextCommandId_));
     object.insert(QStringLiteral("cmd"), command);
     object.insert(QStringLiteral("value"), value);
-    return QJsonDocument(object).toJson(QJsonDocument::Compact);
-}
-
-QByteArray MainWindow::makeTestCommand(MotorControlMode mode,
-                                       quint32 commandId) const
-{
-    const auto pid = pidEditorValues();
-    QJsonObject object;
-    object.insert(QStringLiteral("id"), static_cast<qint64>(commandId));
-    object.insert(QStringLiteral("cmd"), QStringLiteral("run_test"));
-    object.insert(QStringLiteral("mode"),
-                  mode == MotorControlMode::Position ? 1 : 0);
-    object.insert(QStringLiteral("target"),
-                  mode == MotorControlMode::Position
-                      ? positionSlider_->value() : speedSlider_->value());
-    object.insert(QStringLiteral("duration_ms"), kTestDurationMs);
-    object.insert(QStringLiteral("sp_kp"), pid[0].kp);
-    object.insert(QStringLiteral("sp_ki"), pid[0].ki);
-    object.insert(QStringLiteral("pos_kp"), pid[1].kp);
-    object.insert(QStringLiteral("pos_ki"), pid[1].ki);
-    object.insert(QStringLiteral("pos_kd"), pid[1].kd);
-    object.insert(QStringLiteral("iq_kp"), pid[2].kp);
-    object.insert(QStringLiteral("iq_ki"), pid[2].ki);
-    object.insert(QStringLiteral("id_kp"), pid[3].kp);
-    object.insert(QStringLiteral("id_ki"), pid[3].ki);
     return QJsonDocument(object).toJson(QJsonDocument::Compact);
 }
 

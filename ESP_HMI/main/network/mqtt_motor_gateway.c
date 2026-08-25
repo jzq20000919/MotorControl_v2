@@ -8,9 +8,8 @@
 #include <string.h>
 
 #include "comm_mgr_ESP.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
-#include "esp_ota_ops.h"
-#include "esp_flash.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -22,22 +21,22 @@
 #define MQTT_GATEWAY_TASK_STACK_SIZE       6144U
 #define MQTT_GATEWAY_TASK_PRIORITY         5U
 #define MQTT_GATEWAY_TELEMETRY_PERIOD_MS   250U
-#define MQTT_GATEWAY_DEFAULT_UART_BAUD      115200U
+#define MQTT_GATEWAY_DEFAULT_UART_BAUD     115200U
 #define MQTT_GATEWAY_SPEED_LIMIT_RPM       2600
 #define MQTT_GATEWAY_TEST_DURATION_MS      7000U
 #define MQTT_GATEWAY_TEST_MAX_SAMPLES      3600U
 #define MQTT_GATEWAY_TEST_CHUNK_SAMPLES    40U
 #define MQTT_GATEWAY_TEST_HEADER_SIZE      20U
 #define MQTT_GATEWAY_TEST_RECORD_SIZE      20U
-#define MQTT_GATEWAY_TEST_FLASH_BYTES      (64U * 1024U)
-#define MQTT_GATEWAY_WRITER_QUEUE_LENGTH   128U
-#define MQTT_GATEWAY_WRITER_BATCH_SAMPLES  32U
-#define MQTT_GATEWAY_WRITER_STACK_SIZE     3072U
-#define MQTT_GATEWAY_WRITER_PRIORITY       4U
+#define MQTT_GATEWAY_TEST_SEND_PERIOD_US   50000LL
+#define MQTT_GATEWAY_TEST_START_TIMEOUT_US 5000000LL
+#define MQTT_GATEWAY_TEST_STOP_TIMEOUT_US  3000000LL
+#define MQTT_GATEWAY_TEST_SEND_TIMEOUT_US  30000000LL
 
 typedef struct
 {
     char payload[MQTT_GATEWAY_COMMAND_MAX_LEN + 1U];
+    bool local;
 } mqtt_gateway_command_t;
 
 typedef struct
@@ -56,28 +55,11 @@ _Static_assert(sizeof(mqtt_test_sample_t) == 16U,
 
 typedef enum
 {
-    MQTT_TEST_WRITER_BEGIN = 0,
-    MQTT_TEST_WRITER_SAMPLE,
-    MQTT_TEST_WRITER_FLUSH
-} mqtt_test_writer_command_t;
-
-typedef struct
-{
-    mqtt_test_writer_command_t command;
-    mqtt_test_sample_t sample;
-} mqtt_test_writer_item_t;
-
-typedef enum
-{
     MQTT_TEST_IDLE = 0,
-    MQTT_TEST_ACTIVATING_CAN,
-    MQTT_TEST_WAIT_LINK,
-    MQTT_TEST_CONFIGURING,
-    MQTT_TEST_WAIT_RUNNING,
+    MQTT_TEST_STARTING,
     MQTT_TEST_RECORDING,
-    MQTT_TEST_WAIT_STOP,
-    MQTT_TEST_FLUSHING,
-    MQTT_TEST_PUBLISHING
+    MQTT_TEST_STOPPING,
+    MQTT_TEST_SENDING
 } mqtt_test_stage_t;
 
 typedef struct
@@ -87,32 +69,94 @@ typedef struct
     CommMgr_ESP_mode_t mode;
     int32_t target;
     uint32_t duration_ms;
-    int16_t pid[4][3];
+    mqtt_test_sample_t *samples;
     int64_t deadline_us;
     int64_t first_sample_timestamp_us;
     uint32_t last_sample_sequence;
     uint16_t sample_count;
     uint16_t publish_index;
     int64_t next_publish_us;
-    bool aborted;
+    int64_t reject_check_after_us;
     uint32_t last_sample_time_us;
+    bool start_issued;
+    bool stop_requested;
 } mqtt_test_state_t;
 
 static const char *TAG = "MQTT_MOTOR";
 static QueueHandle_t s_command_queue;
 static TaskHandle_t s_gateway_task;
-static QueueHandle_t s_writer_queue;
-static TaskHandle_t s_writer_task;
 static mqtt_test_state_t s_test;
-static portMUX_TYPE s_writer_lock = portMUX_INITIALIZER_UNLOCKED;
-static uint32_t s_test_flash_offset;
-static bool s_writer_flush_complete;
-static bool s_writer_error;
+static mqtt_motor_test_snapshot_t s_test_snapshot;
+static portMUX_TYPE s_test_snapshot_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_next_local_test_id = 1000000000UL;
+
+static const int16_t s_default_pid[4][3] = {
+    {2144, 5, 0},
+    {48, 4, 8},
+    {3633, 2693, 0},
+    {3633, 2693, 0}
+};
+
+static void mqtt_gateway_update_test_snapshot(
+    mqtt_motor_test_ui_state_t state,
+    const char *message)
+{
+    portENTER_CRITICAL(&s_test_snapshot_lock);
+    s_test_snapshot.state = state;
+    if (s_test.command_id != 0U) {
+        s_test_snapshot.mode = (mqtt_motor_local_test_mode_t)s_test.mode;
+        s_test_snapshot.command_id = s_test.command_id;
+        s_test_snapshot.duration_ms = s_test.duration_ms;
+        s_test_snapshot.sample_count = s_test.sample_count;
+    }
+    strlcpy(s_test_snapshot.message,
+            message != NULL ? message : "",
+            sizeof(s_test_snapshot.message));
+    s_test_snapshot.revision++;
+    portEXIT_CRITICAL(&s_test_snapshot_lock);
+}
+
+static void mqtt_gateway_update_pid_snapshot(
+    uint8_t controller,
+    int16_t kp,
+    int16_t ki,
+    int16_t kd)
+{
+    portENTER_CRITICAL(&s_test_snapshot_lock);
+    s_test_snapshot.pid[controller][0] = kp;
+    s_test_snapshot.pid[controller][1] = ki;
+    if (controller == COMM_MGR_ESP_PID_POSITION) {
+        s_test_snapshot.pid[controller][2] = kd;
+    }
+    s_test_snapshot.revision++;
+    portEXIT_CRITICAL(&s_test_snapshot_lock);
+}
+
+/** @brief 将 MQTT 预先缓存的九个有效 PID 增益排队到当前 CAN 通道。 */
+static void mqtt_gateway_apply_cached_pid(void)
+{
+    int16_t pid[4][3];
+    portENTER_CRITICAL(&s_test_snapshot_lock);
+    memcpy(pid, s_test_snapshot.pid, sizeof(pid));
+    portEXIT_CRITICAL(&s_test_snapshot_lock);
+
+    for (uint8_t controller = 0U; controller < 4U; controller++) {
+        CommMgr_ESP_SetPidGain(
+            (CommMgr_ESP_pid_controller_t)controller,
+            COMM_MGR_ESP_PID_KP, pid[controller][0]);
+        CommMgr_ESP_SetPidGain(
+            (CommMgr_ESP_pid_controller_t)controller,
+            COMM_MGR_ESP_PID_KI, pid[controller][1]);
+        if (controller == COMM_MGR_ESP_PID_POSITION) {
+            CommMgr_ESP_SetPidGain(
+                COMM_MGR_ESP_PID_POSITION,
+                COMM_MGR_ESP_PID_KD, pid[controller][2]);
+        }
+    }
+}
 
 static int32_t mqtt_gateway_clamp_i32(
-    int32_t value,
-    int32_t minimum,
-    int32_t maximum)
+    int32_t value, int32_t minimum, int32_t maximum)
 {
     if (value < minimum) {
         return minimum;
@@ -137,106 +181,8 @@ static void mqtt_gateway_write_u32(uint8_t *data, uint32_t value)
     data[3] = (uint8_t)(value >> 24U);
 }
 
-static void mqtt_gateway_set_writer_state(bool flush_complete, bool error)
-{
-    portENTER_CRITICAL(&s_writer_lock);
-    s_writer_flush_complete = flush_complete;
-    if (error) {
-        s_writer_error = true;
-    }
-    portEXIT_CRITICAL(&s_writer_lock);
-}
-
-static void mqtt_gateway_get_writer_state(
-    bool *flush_complete,
-    bool *error)
-{
-    portENTER_CRITICAL(&s_writer_lock);
-    *flush_complete = s_writer_flush_complete;
-    *error = s_writer_error;
-    portEXIT_CRITICAL(&s_writer_lock);
-}
-
-static bool mqtt_gateway_flash_write_samples(
-    uint32_t *write_offset,
-    const mqtt_test_sample_t *samples,
-    uint16_t count)
-{
-    const uint32_t bytes =
-        (uint32_t)count * (uint32_t)sizeof(mqtt_test_sample_t);
-    if (*write_offset + bytes > MQTT_GATEWAY_TEST_FLASH_BYTES) {
-        return false;
-    }
-    if (esp_flash_write(NULL, samples,
-                        s_test_flash_offset + *write_offset,
-                        bytes) != ESP_OK) {
-        return false;
-    }
-    *write_offset += bytes;
-    return true;
-}
-
-static void mqtt_gateway_writer_task(void *argument)
-{
-    (void)argument;
-    mqtt_test_sample_t batch[MQTT_GATEWAY_WRITER_BATCH_SAMPLES];
-    uint16_t batch_count = 0U;
-    uint32_t write_offset = 0U;
-    mqtt_test_writer_item_t item;
-
-    for (;;) {
-        if (xQueueReceive(s_writer_queue, &item, portMAX_DELAY) != pdTRUE) {
-            continue;
-        }
-        if (item.command == MQTT_TEST_WRITER_BEGIN) {
-            batch_count = 0U;
-            write_offset = 0U;
-            portENTER_CRITICAL(&s_writer_lock);
-            s_writer_flush_complete = false;
-            s_writer_error = false;
-            portEXIT_CRITICAL(&s_writer_lock);
-            continue;
-        }
-        if (item.command == MQTT_TEST_WRITER_SAMPLE) {
-            batch[batch_count++] = item.sample;
-            if (batch_count == MQTT_GATEWAY_WRITER_BATCH_SAMPLES) {
-                if (!mqtt_gateway_flash_write_samples(
-                        &write_offset, batch, batch_count)) {
-                    mqtt_gateway_set_writer_state(false, true);
-                }
-                batch_count = 0U;
-            }
-            continue;
-        }
-        if (item.command == MQTT_TEST_WRITER_FLUSH) {
-            bool error = false;
-            if (batch_count > 0U &&
-                !mqtt_gateway_flash_write_samples(
-                    &write_offset, batch, batch_count)) {
-                error = true;
-            }
-            batch_count = 0U;
-            mqtt_gateway_set_writer_state(true, error);
-        }
-    }
-}
-
-static bool mqtt_gateway_queue_writer_command(
-    mqtt_test_writer_command_t command,
-    const mqtt_test_sample_t *sample)
-{
-    mqtt_test_writer_item_t item = {.command = command};
-    if (sample != NULL) {
-        item.sample = *sample;
-    }
-    return s_writer_queue != NULL &&
-        xQueueSend(s_writer_queue, &item, 0U) == pdTRUE;
-}
-
 static void mqtt_gateway_publish_ack(
-    uint32_t command_id,
-    bool accepted,
-    const char *message)
+    uint32_t command_id, bool accepted, const char *message)
 {
     char payload[192];
     snprintf(payload, sizeof(payload),
@@ -247,32 +193,41 @@ static void mqtt_gateway_publish_ack(
     (void)mqtt_manager_publish(MQTT_MOTOR_ACK_TOPIC, payload);
 }
 
-static void mqtt_gateway_publish_test_status(
+static bool mqtt_gateway_publish_test_status_for(
+    uint32_t command_id,
+    CommMgr_ESP_mode_t mode,
+    uint16_t sample_count,
+    uint32_t last_sample_time_us,
     const char *stage,
     const char *message)
 {
-    uint32_t sample_period_us = 0U;
-    if (s_test.sample_count > 1U) {
-        sample_period_us =
-            s_test.last_sample_time_us / (s_test.sample_count - 1U);
-    }
+    const uint32_t sample_period_us = sample_count > 1U
+        ? last_sample_time_us / (sample_count - 1U) : 0U;
     char payload[256];
     snprintf(payload, sizeof(payload),
              "{\"id\":%lu,\"stage\":\"%s\",\"mode\":%u,"
              "\"samples\":%u,\"sample_period_us\":%lu,"
              "\"message\":\"%s\"}",
-             (unsigned long)s_test.command_id,
+             (unsigned long)command_id,
              stage,
-             (unsigned)s_test.mode,
-             (unsigned)s_test.sample_count,
+             (unsigned)mode,
+             (unsigned)sample_count,
              (unsigned long)sample_period_us,
              message != NULL ? message : "");
-    (void)mqtt_manager_publish(MQTT_MOTOR_TEST_STATUS_TOPIC, payload);
+    return mqtt_manager_publish(
+               MQTT_MOTOR_TEST_STATUS_TOPIC, payload) == ESP_OK;
+}
+
+static bool mqtt_gateway_publish_test_status(
+    const char *stage, const char *message)
+{
+    return mqtt_gateway_publish_test_status_for(
+        s_test.command_id, s_test.mode, s_test.sample_count,
+        s_test.last_sample_time_us, stage, message);
 }
 
 static bool mqtt_gateway_require_link(
-    const CommMgr_ESP_State *snapshot,
-    uint32_t command_id)
+    const CommMgr_ESP_State *snapshot, uint32_t command_id)
 {
     if (snapshot->link_active) {
         return true;
@@ -282,9 +237,7 @@ static bool mqtt_gateway_require_link(
 }
 
 static bool mqtt_gateway_json_int(
-    const char *json,
-    const char *key,
-    int32_t *value)
+    const char *json, const char *key, int32_t *value)
 {
     char pattern[32];
     snprintf(pattern, sizeof(pattern), "\"%s\"", key);
@@ -310,10 +263,7 @@ static bool mqtt_gateway_json_int(
 }
 
 static bool mqtt_gateway_json_string(
-    const char *json,
-    const char *key,
-    char *value,
-    size_t value_size)
+    const char *json, const char *key, char *value, size_t value_size)
 {
     if (value_size == 0U) {
         return false;
@@ -350,66 +300,35 @@ static bool mqtt_gateway_json_string(
 
 static void mqtt_gateway_reset_test(void)
 {
+    if (s_test.samples != NULL) {
+        heap_caps_free(s_test.samples);
+    }
     memset(&s_test, 0, sizeof(s_test));
     s_test.stage = MQTT_TEST_IDLE;
-}
-
-static bool mqtt_gateway_read_test_pid(const char *payload)
-{
-    static const char *keys[4][3] = {
-        {"sp_kp", "sp_ki", NULL},
-        {"pos_kp", "pos_ki", "pos_kd"},
-        {"iq_kp", "iq_ki", NULL},
-        {"id_kp", "id_ki", NULL}
-    };
-    for (uint8_t controller = 0U; controller < 4U; controller++) {
-        for (uint8_t term = 0U; term < 3U; term++) {
-            int32_t value = 0;
-            if (keys[controller][term] != NULL &&
-                !mqtt_gateway_json_int(
-                    payload, keys[controller][term], &value)) {
-                return false;
-            }
-            if (value < 0 || value > INT16_MAX) {
-                return false;
-            }
-            s_test.pid[controller][term] = (int16_t)value;
-        }
-    }
-    return true;
-}
-
-static void mqtt_gateway_apply_test_configuration(void)
-{
-    for (uint8_t controller = 0U; controller < 4U; controller++) {
-        for (uint8_t term = 0U; term < 3U; term++) {
-            CommMgr_ESP_SetPidGain(
-                (CommMgr_ESP_pid_controller_t)controller,
-                (CommMgr_ESP_pid_term_t)term,
-                s_test.pid[controller][term]);
-        }
-    }
-    CommMgr_ESP_SetMode(s_test.mode);
 }
 
 static void mqtt_gateway_fail_test(const char *message)
 {
     CommMgr_ESP_Stop();
-    mqtt_gateway_publish_test_status("error", message);
+    (void)mqtt_gateway_publish_test_status("error", message);
+    mqtt_gateway_update_test_snapshot(MQTT_MOTOR_TEST_UI_ERROR, message);
     mqtt_gateway_reset_test();
 }
 
-static void mqtt_gateway_begin_test_publish(void)
+static void mqtt_gateway_begin_test_send(int64_t now_us)
 {
     if (s_test.sample_count == 0U) {
         mqtt_gateway_fail_test("No CAN samples recorded");
         return;
     }
-    s_test.stage = MQTT_TEST_PUBLISHING;
+    s_test.stage = MQTT_TEST_SENDING;
     s_test.publish_index = 0U;
-    s_test.next_publish_us = esp_timer_get_time();
-    mqtt_gateway_publish_test_status(
-        "publishing", "Sending recorded CAN samples");
+    s_test.next_publish_us = now_us + MQTT_GATEWAY_TEST_SEND_PERIOD_US;
+    s_test.deadline_us = now_us + MQTT_GATEWAY_TEST_SEND_TIMEOUT_US;
+    mqtt_gateway_update_test_snapshot(
+        MQTT_MOTOR_TEST_UI_UPLOADING, "Test complete; uploading MQTT data");
+    (void)mqtt_gateway_publish_test_status(
+        "sending", "Sending recorded CAN samples");
 }
 
 static bool mqtt_gateway_publish_test_chunk(void)
@@ -421,16 +340,6 @@ static bool mqtt_gateway_publish_test_chunk(void)
     uint8_t packet[MQTT_GATEWAY_TEST_HEADER_SIZE +
                    MQTT_GATEWAY_TEST_CHUNK_SAMPLES *
                        MQTT_GATEWAY_TEST_RECORD_SIZE];
-    mqtt_test_sample_t stored[MQTT_GATEWAY_TEST_CHUNK_SAMPLES];
-    const uint32_t stored_bytes =
-        (uint32_t)count * (uint32_t)sizeof(mqtt_test_sample_t);
-    if (esp_flash_read(NULL, stored,
-                       s_test_flash_offset +
-                           (uint32_t)s_test.publish_index *
-                               (uint32_t)sizeof(mqtt_test_sample_t),
-                       stored_bytes) != ESP_OK) {
-        return false;
-    }
     memset(packet, 0, sizeof(packet));
     packet[0] = 'M';
     packet[1] = 'C';
@@ -439,9 +348,8 @@ static bool mqtt_gateway_publish_test_chunk(void)
     packet[4] = 1U;
     packet[5] = (uint8_t)s_test.mode;
     packet[6] = MQTT_GATEWAY_TEST_RECORD_SIZE;
-    packet[7] = (uint8_t)(s_test.aborted ? 2U : 0U);
     if ((uint16_t)(s_test.publish_index + count) == s_test.sample_count) {
-        packet[7] |= 1U;
+        packet[7] = 1U;
     }
     mqtt_gateway_write_u32(&packet[8], s_test.command_id);
     mqtt_gateway_write_u32(&packet[12], s_test.publish_index);
@@ -450,7 +358,7 @@ static bool mqtt_gateway_publish_test_chunk(void)
 
     for (uint16_t index = 0U; index < count; index++) {
         const mqtt_test_sample_t *sample =
-            &stored[index];
+            &s_test.samples[s_test.publish_index + index];
         uint8_t *record = &packet[MQTT_GATEWAY_TEST_HEADER_SIZE +
                                   index * MQTT_GATEWAY_TEST_RECORD_SIZE];
         mqtt_gateway_write_u32(&record[0], sample->time_us);
@@ -483,13 +391,15 @@ static bool mqtt_gateway_publish_test_chunk(void)
     return true;
 }
 
-static void mqtt_gateway_record_sample(const CommMgr_ESP_State *snapshot)
+static bool mqtt_gateway_record_sample(const CommMgr_ESP_State *snapshot)
 {
-    if (snapshot->sample_sequence == s_test.last_sample_sequence ||
-        s_test.sample_count >= MQTT_GATEWAY_TEST_MAX_SAMPLES) {
-        return;
+    if (snapshot->sample_sequence == s_test.last_sample_sequence) {
+        return true;
     }
     s_test.last_sample_sequence = snapshot->sample_sequence;
+    if (s_test.sample_count >= MQTT_GATEWAY_TEST_MAX_SAMPLES) {
+        return false;
+    }
     if (s_test.first_sample_timestamp_us == 0LL) {
         s_test.first_sample_timestamp_us = snapshot->sample_timestamp_us;
     }
@@ -498,29 +408,32 @@ static void mqtt_gateway_record_sample(const CommMgr_ESP_State *snapshot)
     if (relative < 0LL) {
         relative = 0LL;
     }
-    mqtt_test_sample_t sample = {0};
-    sample.time_us = relative > UINT32_MAX
+
+    mqtt_test_sample_t *sample = &s_test.samples[s_test.sample_count];
+    memset(sample, 0, sizeof(*sample));
+    sample->time_us = relative > UINT32_MAX
         ? UINT32_MAX : (uint32_t)relative;
     if (s_test.mode == COMM_MGR_ESP_MODE_SPEED) {
-        sample.primary_measured = snapshot->measured_speed_rpm;
-        sample.primary_reference = snapshot->reference_speed_rpm;
+        sample->primary_measured = snapshot->measured_speed_rpm;
+        sample->primary_reference = snapshot->reference_speed_rpm;
     } else {
-        sample.primary_measured =
+        sample->primary_measured =
             (int16_t)snapshot->current_position_cdeg;
-        sample.primary_reference =
+        sample->primary_reference =
             (int16_t)snapshot->target_position_cdeg;
     }
-    sample.iq_ma = snapshot->iq_ma;
-    sample.id_ma = snapshot->id_ma;
-    sample.iq_reference_ma = snapshot->iq_reference_ma;
-    sample.id_reference_ma = snapshot->id_reference_ma;
-    if (!mqtt_gateway_queue_writer_command(
-            MQTT_TEST_WRITER_SAMPLE, &sample)) {
-        mqtt_gateway_set_writer_state(false, true);
-        return;
-    }
-    s_test.last_sample_time_us = sample.time_us;
+    sample->iq_ma = snapshot->iq_ma;
+    sample->id_ma = snapshot->id_ma;
+    sample->iq_reference_ma = snapshot->iq_reference_ma;
+    sample->id_reference_ma = snapshot->id_reference_ma;
+    s_test.last_sample_time_us = sample->time_us;
     s_test.sample_count++;
+    if ((s_test.sample_count % 50U) == 0U) {
+        portENTER_CRITICAL(&s_test_snapshot_lock);
+        s_test_snapshot.sample_count = s_test.sample_count;
+        portEXIT_CRITICAL(&s_test_snapshot_lock);
+    }
+    return true;
 }
 
 static void mqtt_gateway_service_test(void)
@@ -533,61 +446,40 @@ static void mqtt_gateway_service_test(void)
     const int64_t now_us = esp_timer_get_time();
 
     switch (s_test.stage) {
-    case MQTT_TEST_ACTIVATING_CAN:
-        if (CommMgr_ESP_SelectCAN() != ESP_OK) {
-            mqtt_gateway_fail_test("CAN activation failed");
-            break;
-        }
-        s_test.stage = MQTT_TEST_WAIT_LINK;
-        s_test.deadline_us = now_us + 3000000LL;
-        mqtt_gateway_publish_test_status(
-            "waiting_can", "Waiting for high-rate CAN feedback");
-        break;
-
-    case MQTT_TEST_WAIT_LINK:
-        if (snapshot.transport == COMM_MGR_ESP_CAN &&
-            snapshot.link_active && !snapshot.motor_running) {
+    case MQTT_TEST_STARTING:
+        if (!s_test.start_issued) {
+            if (snapshot.transport != COMM_MGR_ESP_CAN) {
+                if (CommMgr_ESP_SelectCAN() != ESP_OK) {
+                    mqtt_gateway_fail_test("CAN activation failed");
+                }
+                break;
+            }
             if (snapshot.motor_fault) {
                 mqtt_gateway_fail_test("STM32 has an active motor fault");
                 break;
             }
-            if (esp_flash_erase_region(
-                    NULL, s_test_flash_offset,
-                    MQTT_GATEWAY_TEST_FLASH_BYTES) != ESP_OK) {
-                mqtt_gateway_fail_test("Test flash erase failed");
-                break;
+            if (snapshot.link_active && !snapshot.motor_running) {
+                mqtt_gateway_apply_cached_pid();
+                CommMgr_ESP_SetMode(s_test.mode);
+                CommMgr_ESP_Start();
+                s_test.start_issued = true;
+                s_test.deadline_us =
+                    now_us + MQTT_GATEWAY_TEST_START_TIMEOUT_US;
+                /* 等待 MODE/START 至少经过若干 CAN TX 周期再判断回显。 */
+                s_test.reject_check_after_us = now_us + 200000LL;
+            } else if (now_us >= s_test.deadline_us) {
+                mqtt_gateway_fail_test("CAN link did not become ready");
             }
-            if (!mqtt_gateway_queue_writer_command(
-                    MQTT_TEST_WRITER_BEGIN, NULL)) {
-                mqtt_gateway_fail_test("Test flash writer unavailable");
-                break;
-            }
-            mqtt_gateway_apply_test_configuration();
-            s_test.stage = MQTT_TEST_CONFIGURING;
-            s_test.deadline_us = now_us + 150000LL;
-            mqtt_gateway_publish_test_status(
-                "configuring", "Applying PID and control mode");
-        } else if (now_us >= s_test.deadline_us) {
-            mqtt_gateway_fail_test("CAN link did not become ready");
+            break;
         }
-        break;
-
-    case MQTT_TEST_CONFIGURING:
-        if (now_us >= s_test.deadline_us) {
-            if (snapshot.command_rejected || snapshot.mode != s_test.mode) {
-                mqtt_gateway_fail_test("STM32 rejected PID or mode setup");
-                break;
-            }
-            CommMgr_ESP_Start();
-            s_test.stage = MQTT_TEST_WAIT_RUNNING;
-            s_test.deadline_us = now_us + 5000000LL;
-            mqtt_gateway_publish_test_status(
-                "starting", "Waiting for motor RUN state");
-        }
-        break;
-
-    case MQTT_TEST_WAIT_RUNNING:
-        if (snapshot.motor_running) {
+        if (!snapshot.link_active) {
+            mqtt_gateway_fail_test("CAN link lost during startup");
+        } else if (snapshot.motor_fault) {
+            mqtt_gateway_fail_test("Motor fault occurred during startup");
+        } else if (snapshot.command_rejected &&
+                   now_us >= s_test.reject_check_after_us) {
+            mqtt_gateway_fail_test("STM32 rejected mode or START");
+        } else if (snapshot.motor_running && snapshot.mode == s_test.mode) {
             if (s_test.mode == COMM_MGR_ESP_MODE_SPEED) {
                 CommMgr_ESP_SetSpeedRPM((int16_t)s_test.target);
             } else {
@@ -596,91 +488,95 @@ static void mqtt_gateway_service_test(void)
             s_test.stage = MQTT_TEST_RECORDING;
             s_test.last_sample_sequence = snapshot.sample_sequence;
             s_test.first_sample_timestamp_us = 0LL;
-            mqtt_gateway_publish_test_status(
+            s_test.deadline_us = now_us +
+                (int64_t)s_test.duration_ms * 1000LL + 2000000LL;
+            s_test.reject_check_after_us = now_us + 200000LL;
+            (void)mqtt_gateway_publish_test_status(
                 "recording", "Target applied; recording CAN feedback");
-        } else if (snapshot.motor_fault) {
-            mqtt_gateway_fail_test("Motor fault occurred during startup");
-        } else if (snapshot.command_rejected) {
-            mqtt_gateway_fail_test("STM32 rejected the START command");
         } else if (now_us >= s_test.deadline_us) {
             mqtt_gateway_fail_test("Motor did not enter RUN state");
         }
         break;
 
     case MQTT_TEST_RECORDING:
-        if (!snapshot.link_active || !snapshot.motor_running) {
-            s_test.aborted = true;
-            CommMgr_ESP_Stop();
-            s_test.stage = MQTT_TEST_WAIT_STOP;
-            s_test.deadline_us = now_us + 3000000LL;
-            mqtt_gateway_publish_test_status(
-                "stopping", "Test ended early; stopping motor");
+        if (!snapshot.link_active) {
+            mqtt_gateway_fail_test("CAN link lost during test");
             break;
         }
-        mqtt_gateway_record_sample(&snapshot);
-        bool writer_flush_complete = false;
-        bool writer_error = false;
-        mqtt_gateway_get_writer_state(
-            &writer_flush_complete, &writer_error);
-        (void)writer_flush_complete;
-        if (writer_error) {
-            s_test.aborted = true;
-            CommMgr_ESP_Stop();
-            s_test.stage = MQTT_TEST_WAIT_STOP;
-            s_test.deadline_us = now_us + 3000000LL;
-            mqtt_gateway_publish_test_status(
-                "stopping", "Flash writer error; stopping motor");
+        if (snapshot.motor_fault) {
+            mqtt_gateway_fail_test("STM32 fault during test");
             break;
         }
-        if (s_test.sample_count >= MQTT_GATEWAY_TEST_MAX_SAMPLES ||
-            (s_test.sample_count > 0U &&
-             s_test.last_sample_time_us >=
-                 s_test.duration_ms * 1000U)) {
+        if (!snapshot.motor_running) {
+            mqtt_gateway_fail_test("Motor left RUN during test");
+            break;
+        }
+        if (snapshot.command_rejected &&
+            now_us >= s_test.reject_check_after_us) {
+            mqtt_gateway_fail_test("STM32 rejected test target");
+            break;
+        }
+        if (!mqtt_gateway_record_sample(&snapshot)) {
+            mqtt_gateway_fail_test("RAM sample buffer overflow");
+            break;
+        }
+        if (s_test.sample_count > 0U &&
+            s_test.last_sample_time_us >= s_test.duration_ms * 1000U) {
             CommMgr_ESP_Stop();
-            s_test.stage = MQTT_TEST_WAIT_STOP;
-            s_test.deadline_us = now_us + 3000000LL;
-            mqtt_gateway_publish_test_status(
-                "stopping", "Recording complete; stopping motor");
+            s_test.stage = MQTT_TEST_STOPPING;
+            s_test.deadline_us = now_us + MQTT_GATEWAY_TEST_STOP_TIMEOUT_US;
+        } else if (s_test.sample_count >= MQTT_GATEWAY_TEST_MAX_SAMPLES) {
+            mqtt_gateway_fail_test("RAM sample buffer overflow");
+        } else if (now_us >= s_test.deadline_us) {
+            mqtt_gateway_fail_test("CAN sampling timed out");
         }
         break;
 
-    case MQTT_TEST_WAIT_STOP:
-        if (!snapshot.motor_running || now_us >= s_test.deadline_us) {
-            if (mqtt_gateway_queue_writer_command(
-                    MQTT_TEST_WRITER_FLUSH, NULL)) {
-                s_test.stage = MQTT_TEST_FLUSHING;
-                mqtt_gateway_publish_test_status(
-                    "flushing", "Finalizing recorded CAN samples");
-            }
+    case MQTT_TEST_STOPPING:
+        if (!snapshot.link_active) {
+            mqtt_gateway_fail_test("CAN link lost while stopping");
+        } else if (snapshot.motor_fault) {
+            mqtt_gateway_fail_test("STM32 fault while stopping");
+        } else if (!snapshot.motor_running) {
+            mqtt_gateway_begin_test_send(now_us);
+        } else if (now_us >= s_test.deadline_us) {
+            mqtt_gateway_fail_test("Motor stop timed out");
         }
         break;
 
-    case MQTT_TEST_FLUSHING: {
-        bool flush_complete = false;
-        bool writer_error = false;
-        mqtt_gateway_get_writer_state(&flush_complete, &writer_error);
-        if (writer_error) {
-            mqtt_gateway_fail_test("Test flash write failed");
-        } else if (flush_complete) {
-            mqtt_gateway_begin_test_publish();
+    case MQTT_TEST_SENDING:
+        if (!snapshot.link_active) {
+            mqtt_gateway_fail_test("CAN link lost while sending data");
+            break;
         }
-        break;
-    }
-
-    case MQTT_TEST_PUBLISHING:
+        if (snapshot.motor_fault) {
+            mqtt_gateway_fail_test("STM32 fault while sending data");
+            break;
+        }
         if (s_test.publish_index < s_test.sample_count) {
             if (now_us >= s_test.next_publish_us) {
-                const bool queued = mqtt_gateway_publish_test_chunk();
-                s_test.next_publish_us = now_us +
-                    (queued ? 20000LL : 10000LL);
+                (void)mqtt_gateway_publish_test_chunk();
+                s_test.next_publish_us =
+                    now_us + MQTT_GATEWAY_TEST_SEND_PERIOD_US;
             }
-        } else {
-            mqtt_gateway_publish_test_status(
-                s_test.aborted ? "aborted" : "complete",
-                s_test.aborted
-                    ? "Partial CAN dataset sent"
-                    : "CAN dataset sent");
-            mqtt_gateway_reset_test();
+        } else if (now_us >= s_test.next_publish_us) {
+                if (mqtt_gateway_publish_test_status(
+                    "complete",
+                    s_test.stop_requested
+                        ? "Stopped test dataset sent"
+                        : "CAN dataset sent")) {
+                mqtt_gateway_update_test_snapshot(
+                    MQTT_MOTOR_TEST_UI_UPLOAD_SUCCESS,
+                    "Upload successful");
+                mqtt_gateway_reset_test();
+            } else {
+                s_test.next_publish_us =
+                    now_us + MQTT_GATEWAY_TEST_SEND_PERIOD_US;
+            }
+        }
+        if (s_test.stage == MQTT_TEST_SENDING &&
+            now_us >= s_test.deadline_us) {
+            mqtt_gateway_fail_test("MQTT test data send timed out");
         }
         break;
 
@@ -690,20 +586,36 @@ static void mqtt_gateway_service_test(void)
     }
 }
 
+static mqtt_test_sample_t *mqtt_gateway_allocate_test_samples(void)
+{
+    const size_t bytes = MQTT_GATEWAY_TEST_MAX_SAMPLES *
+        sizeof(mqtt_test_sample_t);
+    mqtt_test_sample_t *samples = heap_caps_malloc(
+        bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (samples == NULL) {
+        samples = heap_caps_malloc(
+            bytes, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    return samples;
+}
+
 static void mqtt_gateway_start_test(
-    const char *payload,
-    uint32_t command_id)
+    const char *payload, uint32_t command_id)
 {
     int32_t mode = 0;
     int32_t target = 0;
     int32_t duration_ms = MQTT_GATEWAY_TEST_DURATION_MS;
     if (s_test.stage != MQTT_TEST_IDLE) {
         mqtt_gateway_publish_ack(command_id, false, "Test already running");
+        mqtt_gateway_update_test_snapshot(
+            MQTT_MOTOR_TEST_UI_ERROR, "Another test is already running");
         return;
     }
     if (!mqtt_gateway_json_int(payload, "mode", &mode) ||
         !mqtt_gateway_json_int(payload, "target", &target)) {
         mqtt_gateway_publish_ack(command_id, false, "Missing test fields");
+        mqtt_gateway_update_test_snapshot(
+            MQTT_MOTOR_TEST_UI_ERROR, "Invalid local test request");
         return;
     }
     (void)mqtt_gateway_json_int(payload, "duration_ms", &duration_ms);
@@ -712,6 +624,8 @@ static void mqtt_gateway_start_test(
         (mode == 0 && (target < -MQTT_GATEWAY_SPEED_LIMIT_RPM ||
                        target > MQTT_GATEWAY_SPEED_LIMIT_RPM))) {
         mqtt_gateway_publish_ack(command_id, false, "Invalid test settings");
+        mqtt_gateway_update_test_snapshot(
+            MQTT_MOTOR_TEST_UI_ERROR, "Invalid local test settings");
         return;
     }
     if (mode == 1) {
@@ -721,28 +635,55 @@ static void mqtt_gateway_start_test(
         }
     }
 
+    mqtt_manager_snapshot_t mqtt_snapshot;
+    mqtt_manager_get_snapshot(&mqtt_snapshot);
+    if (!mqtt_snapshot.connected) {
+        mqtt_gateway_publish_ack(command_id, false, "MQTT is offline");
+        mqtt_gateway_update_test_snapshot(
+            MQTT_MOTOR_TEST_UI_ERROR, "Connect MQTT before starting a test");
+        return;
+    }
+    CommMgr_ESP_State motor_snapshot;
+    CommMgr_ESP_GetState(&motor_snapshot);
+    if (motor_snapshot.motor_running) {
+        mqtt_gateway_publish_ack(command_id, false, "Motor is already running");
+        mqtt_gateway_update_test_snapshot(
+            MQTT_MOTOR_TEST_UI_ERROR, "Stop the motor before starting a test");
+        return;
+    }
+
+    mqtt_test_sample_t *samples = mqtt_gateway_allocate_test_samples();
+    if (samples == NULL) {
+        mqtt_gateway_publish_ack(command_id, false,
+                                 "Test RAM allocation failed");
+        (void)mqtt_gateway_publish_test_status_for(
+            command_id,
+            mode == 0 ? COMM_MGR_ESP_MODE_SPEED
+                      : COMM_MGR_ESP_MODE_POSITION,
+            0U, 0U, "error", "Test RAM allocation failed");
+        mqtt_gateway_update_test_snapshot(
+            MQTT_MOTOR_TEST_UI_ERROR, "Test RAM allocation failed");
+        return;
+    }
+
     memset(&s_test, 0, sizeof(s_test));
     s_test.command_id = command_id;
     s_test.mode = mode == 0
         ? COMM_MGR_ESP_MODE_SPEED : COMM_MGR_ESP_MODE_POSITION;
     s_test.target = target;
     s_test.duration_ms = (uint32_t)duration_ms;
-    if (!mqtt_gateway_read_test_pid(payload)) {
-        mqtt_gateway_reset_test();
-        mqtt_gateway_publish_ack(command_id, false, "Invalid test PID values");
-        return;
-    }
-    /*
-     * 先完成 MQTT 命令确认，再由网关任务下一轮初始化 CAN 和分配记录内存。
-     * 这样 CAN 硬件异常或内存紧张不会阻塞 ESP-MQTT 的入站 QoS1 处理。
-     */
-    s_test.stage = MQTT_TEST_ACTIVATING_CAN;
+    s_test.samples = samples;
+    s_test.stage = MQTT_TEST_STARTING;
+    s_test.deadline_us = esp_timer_get_time() + 3000000LL;
+    mqtt_gateway_update_test_snapshot(
+        MQTT_MOTOR_TEST_UI_TESTING, "Test in progress");
     mqtt_gateway_publish_ack(command_id, true, "ESP32 test accepted");
-    mqtt_gateway_publish_test_status(
-        "activating_can", "Activating CAN test transport");
+    (void)mqtt_gateway_publish_test_status(
+        "accepted", "Test command accepted; preparing CAN");
 }
 
-static void mqtt_gateway_process_command(const char *payload)
+static void mqtt_gateway_process_command(
+    const char *payload, bool local)
 {
     char command[32];
     int32_t id_value = 0;
@@ -757,7 +698,13 @@ static void mqtt_gateway_process_command(const char *payload)
         return;
     }
     if (strcmp(command, "run_test") == 0) {
-        mqtt_gateway_start_test(payload, command_id);
+        if (local) {
+            mqtt_gateway_start_test(payload, command_id);
+        } else {
+            mqtt_gateway_publish_ack(
+                command_id, false,
+                "Start tests from the ESP32 PID TEST page");
+        }
         return;
     }
 
@@ -766,10 +713,12 @@ static void mqtt_gateway_process_command(const char *payload)
     if (strcmp(command, "stop") == 0) {
         if (mqtt_gateway_require_link(&snapshot, command_id)) {
             CommMgr_ESP_Stop();
-            if (s_test.stage != MQTT_TEST_IDLE) {
-                s_test.aborted = true;
-                s_test.stage = MQTT_TEST_WAIT_STOP;
-                s_test.deadline_us = esp_timer_get_time() + 3000000LL;
+            if (s_test.stage == MQTT_TEST_STARTING ||
+                s_test.stage == MQTT_TEST_RECORDING) {
+                s_test.stop_requested = true;
+                s_test.stage = MQTT_TEST_STOPPING;
+                s_test.deadline_us = esp_timer_get_time() +
+                    MQTT_GATEWAY_TEST_STOP_TIMEOUT_US;
             }
             mqtt_gateway_publish_ack(command_id, true, "Stop accepted");
         }
@@ -783,8 +732,7 @@ static void mqtt_gateway_process_command(const char *payload)
     if (strcmp(command, "claim") == 0) {
         esp_err_t result = ESP_OK;
         if (snapshot.transport == COMM_MGR_ESP_NONE) {
-            result = CommMgr_ESP_SelectUSART(
-                MQTT_GATEWAY_DEFAULT_UART_BAUD);
+            result = CommMgr_ESP_SelectUSART(MQTT_GATEWAY_DEFAULT_UART_BAUD);
         }
         mqtt_gateway_publish_ack(
             command_id, result == ESP_OK,
@@ -825,30 +773,43 @@ static void mqtt_gateway_process_command(const char *payload)
         int32_t kp = 0;
         int32_t ki = 0;
         int32_t kd = 0;
+        const bool has_kd = mqtt_gateway_json_int(payload, "kd", &kd);
         const bool valid =
             mqtt_gateway_json_int(payload, "controller", &controller) &&
             mqtt_gateway_json_int(payload, "kp", &kp) &&
             mqtt_gateway_json_int(payload, "ki", &ki) &&
-            mqtt_gateway_json_int(payload, "kd", &kd);
-        if (!valid || controller < 0 || controller > 3 ||
-            kp < 0 || kp > INT16_MAX || ki < 0 || ki > INT16_MAX ||
-            kd < 0 || kd > INT16_MAX) {
+            controller >= 0 && controller <= 3 &&
+            kp >= 0 && kp <= INT16_MAX &&
+            ki >= 0 && ki <= INT16_MAX &&
+            (controller != COMM_MGR_ESP_PID_POSITION ||
+             (has_kd && kd >= 0 && kd <= INT16_MAX));
+        if (!valid) {
             mqtt_gateway_publish_ack(command_id, false, "Invalid PID values");
         } else if (snapshot.motor_running) {
             mqtt_gateway_publish_ack(
                 command_id, false, "Stop motor before PID update");
-        } else if (mqtt_gateway_require_link(&snapshot, command_id)) {
-            CommMgr_ESP_SetPidGain(
-                (CommMgr_ESP_pid_controller_t)controller,
-                COMM_MGR_ESP_PID_KP, (int16_t)kp);
-            CommMgr_ESP_SetPidGain(
-                (CommMgr_ESP_pid_controller_t)controller,
-                COMM_MGR_ESP_PID_KI, (int16_t)ki);
-            CommMgr_ESP_SetPidGain(
-                (CommMgr_ESP_pid_controller_t)controller,
-                COMM_MGR_ESP_PID_KD, (int16_t)kd);
+        } else {
+            mqtt_gateway_update_pid_snapshot(
+                (uint8_t)controller, (int16_t)kp, (int16_t)ki,
+                (int16_t)kd);
+            const CommMgr_ESP_pid_controller_t pid_controller =
+                (CommMgr_ESP_pid_controller_t)controller;
+            if (snapshot.transport == COMM_MGR_ESP_CAN &&
+                snapshot.link_active) {
+                CommMgr_ESP_SetPidGain(
+                    pid_controller, COMM_MGR_ESP_PID_KP, (int16_t)kp);
+                CommMgr_ESP_SetPidGain(
+                    pid_controller, COMM_MGR_ESP_PID_KI, (int16_t)ki);
+                if (controller == COMM_MGR_ESP_PID_POSITION) {
+                    CommMgr_ESP_SetPidGain(
+                        pid_controller, COMM_MGR_ESP_PID_KD, (int16_t)kd);
+                }
+            }
             mqtt_gateway_publish_ack(
-                command_id, true, "PID accepted temporarily");
+                command_id, true,
+                snapshot.transport == COMM_MGR_ESP_CAN && snapshot.link_active
+                    ? "PID applied and cached temporarily"
+                    : "PID cached for the next local test");
         }
     } else if (strcmp(command, "start") == 0) {
         if (mqtt_gateway_require_link(&snapshot, command_id)) {
@@ -872,9 +833,7 @@ static void mqtt_gateway_process_command(const char *payload)
 }
 
 static void mqtt_gateway_message_callback(
-    const char *topic,
-    const char *payload,
-    void *context)
+    const char *topic, const char *payload, void *context)
 {
     (void)context;
     if (topic == NULL || payload == NULL ||
@@ -883,6 +842,7 @@ static void mqtt_gateway_message_callback(
         return;
     }
     mqtt_gateway_command_t command;
+    memset(&command, 0, sizeof(command));
     strlcpy(command.payload, payload, sizeof(command.payload));
     if (xQueueSend(s_command_queue, &command, 0U) != pdTRUE) {
         mqtt_gateway_command_t discarded;
@@ -908,8 +868,7 @@ static void mqtt_gateway_publish_telemetry(void)
              (unsigned)snapshot.mode,
              (unsigned)snapshot.faults,
              (unsigned long)snapshot.sample_sequence);
-    (void)mqtt_manager_publish_qos0(
-        MQTT_MOTOR_TELEMETRY_TOPIC, payload);
+    (void)mqtt_manager_publish_qos0(MQTT_MOTOR_TELEMETRY_TOPIC, payload);
 }
 
 static void mqtt_gateway_task(void *argument)
@@ -922,7 +881,7 @@ static void mqtt_gateway_task(void *argument)
         if (xQueueReceive(
                 s_command_queue, &command,
                 pdMS_TO_TICKS(1U)) == pdTRUE) {
-            mqtt_gateway_process_command(command.payload);
+            mqtt_gateway_process_command(command.payload, command.local);
         }
         mqtt_gateway_service_test();
         if (s_test.stage == MQTT_TEST_IDLE &&
@@ -931,10 +890,68 @@ static void mqtt_gateway_task(void *argument)
             last_publish = xTaskGetTickCount();
             mqtt_gateway_publish_telemetry();
         } else if (s_test.stage != MQTT_TEST_IDLE) {
-            /* 测试期间禁止周期 MQTT 遥测；CAN 样本只写本地 Flash。 */
+            /* 测试期间 CAN 样本只进入 RAM，停机后才通过 MQTT 回传。 */
             last_publish = xTaskGetTickCount();
         }
     }
+}
+
+esp_err_t mqtt_motor_gateway_start_local_test(
+    mqtt_motor_local_test_mode_t mode)
+{
+    if (mode != MQTT_MOTOR_LOCAL_TEST_SPEED &&
+        mode != MQTT_MOTOR_LOCAL_TEST_POSITION) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_command_queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    portENTER_CRITICAL(&s_test_snapshot_lock);
+    const bool busy =
+        s_test_snapshot.state == MQTT_MOTOR_TEST_UI_TESTING ||
+        s_test_snapshot.state == MQTT_MOTOR_TEST_UI_UPLOADING;
+    if (busy) {
+        portEXIT_CRITICAL(&s_test_snapshot_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    const uint32_t command_id = ++s_next_local_test_id;
+    s_test_snapshot.state = MQTT_MOTOR_TEST_UI_TESTING;
+    s_test_snapshot.mode = mode;
+    s_test_snapshot.command_id = command_id;
+    s_test_snapshot.duration_ms = MQTT_MOTOR_LOCAL_TEST_DURATION_MS;
+    s_test_snapshot.sample_count = 0U;
+    strlcpy(s_test_snapshot.message, "Preparing local test",
+            sizeof(s_test_snapshot.message));
+    s_test_snapshot.revision++;
+    portEXIT_CRITICAL(&s_test_snapshot_lock);
+
+    mqtt_gateway_command_t command = {.local = true};
+    const int32_t target = mode == MQTT_MOTOR_LOCAL_TEST_SPEED
+        ? MQTT_MOTOR_LOCAL_SPEED_TARGET_RPM
+        : (int32_t)MQTT_MOTOR_LOCAL_POSITION_TARGET_CDEG;
+    snprintf(command.payload, sizeof(command.payload),
+             "{\"id\":%lu,\"cmd\":\"run_test\",\"mode\":%u,"
+             "\"target\":%ld,\"duration_ms\":%u}",
+             (unsigned long)command_id, (unsigned)mode,
+             (long)target, (unsigned)MQTT_MOTOR_LOCAL_TEST_DURATION_MS);
+    if (xQueueSendToFront(s_command_queue, &command, 0U) != pdTRUE) {
+        mqtt_gateway_update_test_snapshot(
+            MQTT_MOTOR_TEST_UI_ERROR, "Test request queue is full");
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
+}
+
+void mqtt_motor_gateway_get_test_snapshot(
+    mqtt_motor_test_snapshot_t *snapshot)
+{
+    if (snapshot == NULL) {
+        return;
+    }
+    portENTER_CRITICAL(&s_test_snapshot_lock);
+    *snapshot = s_test_snapshot;
+    portEXIT_CRITICAL(&s_test_snapshot_lock);
 }
 
 esp_err_t mqtt_motor_gateway_init(void)
@@ -942,45 +959,20 @@ esp_err_t mqtt_motor_gateway_init(void)
     if (s_gateway_task != NULL) {
         return ESP_OK;
     }
-    uint32_t flash_size = 0U;
-    if (esp_flash_get_size(NULL, &flash_size) != ESP_OK ||
-        flash_size < MQTT_GATEWAY_TEST_FLASH_BYTES) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    s_test_flash_offset =
-        (flash_size - MQTT_GATEWAY_TEST_FLASH_BYTES) & ~0xFFFU;
-    const esp_partition_t *running = esp_ota_get_running_partition();
-    if (running == NULL ||
-        running->address + running->size > s_test_flash_offset) {
-        return ESP_ERR_INVALID_SIZE;
-    }
-    memset(&s_test, 0, sizeof(s_test));
-    s_writer_queue = xQueueCreate(
-        MQTT_GATEWAY_WRITER_QUEUE_LENGTH,
-        sizeof(mqtt_test_writer_item_t));
-    if (s_writer_queue == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-    if (xTaskCreate(
-            mqtt_gateway_writer_task, "test_flash",
-            MQTT_GATEWAY_WRITER_STACK_SIZE, NULL,
-            MQTT_GATEWAY_WRITER_PRIORITY,
-            &s_writer_task) != pdPASS) {
-        vQueueDelete(s_writer_queue);
-        s_writer_queue = NULL;
-        return ESP_ERR_NO_MEM;
-    }
+    mqtt_gateway_reset_test();
+    memset(&s_test_snapshot, 0, sizeof(s_test_snapshot));
+    memcpy(s_test_snapshot.pid, s_default_pid, sizeof(s_default_pid));
+    s_test_snapshot.state = MQTT_MOTOR_TEST_UI_IDLE;
+    s_test_snapshot.duration_ms = MQTT_MOTOR_LOCAL_TEST_DURATION_MS;
+    strlcpy(s_test_snapshot.message, "Ready",
+            sizeof(s_test_snapshot.message));
+    s_test_snapshot.revision = 1U;
     s_command_queue = xQueueCreate(
         MQTT_GATEWAY_QUEUE_LENGTH, sizeof(mqtt_gateway_command_t));
     if (s_command_queue == NULL) {
-        vTaskDelete(s_writer_task);
-        s_writer_task = NULL;
-        vQueueDelete(s_writer_queue);
-        s_writer_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
-    mqtt_manager_set_message_callback(
-        mqtt_gateway_message_callback, NULL);
+    mqtt_manager_set_message_callback(mqtt_gateway_message_callback, NULL);
     if (xTaskCreate(
             mqtt_gateway_task, "mqtt_motor",
             MQTT_GATEWAY_TASK_STACK_SIZE, NULL,
@@ -988,15 +980,9 @@ esp_err_t mqtt_motor_gateway_init(void)
         mqtt_manager_set_message_callback(NULL, NULL);
         vQueueDelete(s_command_queue);
         s_command_queue = NULL;
-        vTaskDelete(s_writer_task);
-        s_writer_task = NULL;
-        vQueueDelete(s_writer_queue);
-        s_writer_queue = NULL;
         return ESP_ERR_NO_MEM;
     }
     ESP_LOGI(TAG,
-             "MQTT motor test gateway ready; flash spool at 0x%lx (%u bytes)",
-             (unsigned long)s_test_flash_offset,
-             (unsigned)MQTT_GATEWAY_TEST_FLASH_BYTES);
+             "MQTT motor test gateway ready; RAM buffer allocated per test");
     return ESP_OK;
 }

@@ -6,6 +6,7 @@
 #include "esp_err.h"
 #include "comm_mgr_ESP.h"
 #include "mqtt_manager.h"
+#include "mqtt_motor_gateway.h"
 
 static motor_ui_event_context_t s_context;
 
@@ -312,6 +313,32 @@ void motor_ui_mqtt_motor_event(lv_event_t *event)
     char payload[160];
     snprintf(payload, sizeof(payload), "running=%u mode=%s speed=%d position=%u.%02u", snapshot.motor_running ? 1U : 0U, snapshot.mode == COMM_MGR_ESP_MODE_SPEED ? "speed" : "position", snapshot.measured_speed_rpm, snapshot.current_position_cdeg / 100U, snapshot.current_position_cdeg % 100U);
     ui_mqtt_publish_test("motor/hmi/test/motor", payload);
+}
+
+/** @brief 从 ESP32 本地界面排队启动固定 500 RPM、7 秒速度测试。 */
+void motor_ui_pid_speed_test_event(lv_event_t *event)
+{
+    (void)event;
+    const esp_err_t result = mqtt_motor_gateway_start_local_test(
+        MQTT_MOTOR_LOCAL_TEST_SPEED);
+    if (result != ESP_OK) {
+        lv_label_set_text_fmt(
+            s_context.pid_test_state_label,
+            "START FAILED: %s", esp_err_to_name(result));
+    }
+}
+
+/** @brief 从 ESP32 本地界面排队启动固定 90°、7 秒位置测试。 */
+void motor_ui_pid_position_test_event(lv_event_t *event)
+{
+    (void)event;
+    const esp_err_t result = mqtt_motor_gateway_start_local_test(
+        MQTT_MOTOR_LOCAL_TEST_POSITION);
+    if (result != ESP_OK) {
+        lv_label_set_text_fmt(
+            s_context.pid_test_state_label,
+            "START FAILED: %s", esp_err_to_name(result));
+    }
 }
 
 /** @brief 更新速度滑块文本，并在释放时提交最终转速。 */

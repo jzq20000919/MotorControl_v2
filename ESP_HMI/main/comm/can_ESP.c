@@ -515,7 +515,8 @@ static void CAN_ESP_tx_task(void *argument)
 
         /** 从离散控制队列中取出的待发送命令。 */
         CAN_ESP_request_t request;
-        while (control_enabled &&xQueueReceive(s_control_queue, &request, 0) == pdTRUE) 
+        if (control_enabled &&
+            xQueueReceive(s_control_queue, &request, 0) == pdTRUE)
         {
             if (CAN_ESP_transmit(request.command, request.value) != ESP_OK) {
                 /*
@@ -523,7 +524,6 @@ static void CAN_ESP_tx_task(void *argument)
                  * 超时时将命令保留在队首，避免静默丢失按键操作。
                  */
                 (void)xQueueSendToFront(s_control_queue, &request, 0);
-                break;
             }
         }
 

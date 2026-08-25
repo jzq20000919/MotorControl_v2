@@ -17,6 +17,7 @@ typedef enum
     UI_PAGE_CAN,
     UI_PAGE_WIFI,
     UI_PAGE_MQTT,
+    UI_PAGE_PID_TEST,
     UI_PAGE_SPEED,
     UI_PAGE_POSITION,
     UI_PAGE_COUNT
@@ -36,6 +37,7 @@ typedef struct
     lv_obj_t *mqtt_uri_textarea;          /**< MQTT 地址输入框。 */
     lv_obj_t *mqtt_page_state_label;      /**< MQTT 页面状态标签。 */
     lv_obj_t *mqtt_keyboard;              /**< MQTT 软键盘。 */
+    lv_obj_t *pid_test_state_label;       /**< 本地 PID 测试状态标签。 */
     lv_obj_t *speed_slider;               /**< 目标速度滑块。 */
     lv_obj_t *speed_slider_value;         /**< 目标速度数值标签。 */
     lv_obj_t *position_slider;            /**< 目标位置滑块。 */
@@ -115,6 +117,10 @@ void motor_ui_mqtt_ping_event(lv_event_t *event);
 void motor_ui_mqtt_wifi_event(lv_event_t *event);
 /** @brief 处理 MQTT 页面跳转到电机页事件。 @param event LVGL 事件对象。 */
 void motor_ui_mqtt_motor_event(lv_event_t *event);
+/** @brief 从本地 PID 测试页启动速度测试。 */
+void motor_ui_pid_speed_test_event(lv_event_t *event);
+/** @brief 从本地 PID 测试页启动位置测试。 */
+void motor_ui_pid_position_test_event(lv_event_t *event);
 /** @brief 处理目标速度滑块事件。 @param event LVGL 事件对象。 */
 void motor_ui_speed_slider_event(lv_event_t *event);
 /** @brief 处理目标位置滑块事件。 @param event LVGL 事件对象。 */

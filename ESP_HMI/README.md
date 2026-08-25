@@ -25,17 +25,23 @@ LVGL / MQTT
 
 ## MQTT 自动测试
 
-Qt 使用 `motor/control/command` 上的一条 `run_test` JSON 命令启动实验。ESP32
-自动选择 CAN，并在本地执行“应用 PID/模式、启动、等待 RUN、设置目标、记录 7 秒、
-停止”的完整状态机。实验过程中只发布低频状态，不发布连续曲线遥测。
+ESP32 新增 `PID TEST` 本地页面。页面显示当前缓存的速度、位置、Iq、Id PID，
+固定 7 秒时长、500 RPM/90.00° 测试目标和测试状态，并提供 `SPEED CONTROL`
+与 `POSITION CONTROL` 两个启动按钮。点击后 ESP32 自动选择 CAN，并在本地执行
+“应用缓存 PID、设置模式、启动、等待 RUN、设置目标、记录、停止、上传”的完整
+状态机。MQTT `run_test` 不再启动测试。
 
 STM32 每 2 ms 发送 0x180、0x181、0x182 三帧完整遥测。ESP32 以 0x182
-到达时间作为一组完成样本的时间戳。样本经小型 RAM 队列成批顺序写入片上
-Flash 的末尾 64 KiB 临时区，最多记录 3600 组，避免大块 RAM 占用影响 Wi-Fi。
-停止并完成 Flash 刷写后，通过
+到达时间作为一组完成样本的时间戳。每次测试开始前优先从 PSRAM、其次从内部
+RAM 分配 3600 组紧凑样本（约 57.6 KiB）；分配失败时不会启动电机。停止后通过
 `motor/control/test/data` 以 QoS 1 二进制分块回传，通过
 `motor/control/test/status` 发布阶段、点数和实际平均采样周期。2 ms 周期在
 500 kbit/s 经典 CAN 下给控制命令、重发和仲裁保留了总线余量。
 
-测试运行期间暂停周期 `motor/control/telemetry` 发布；数据回传按 20 ms/块
+测试运行期间暂停周期 `motor/control/telemetry` 发布；数据回传按 50 ms/块
 节流，防止 MQTT outbox 和 Wi-Fi 发送缓冲区被突发数据塞满。
+
+PID 与测试启动相互独立。Qt 的 `set_pid` 在电机停止时更新 ESP32 运行时缓存；
+CAN 已在线时立即临时下发，否则在下一次本地测试启动前自动下发。速度、Iq、Id
+仅使用 Kp/Ki，位置使用 Kp/Ki/Kd。页面状态依次显示 `TESTING`、
+`TEST COMPLETE - UPLOADING`、`UPLOAD SUCCESS`，错误时显示具体原因。

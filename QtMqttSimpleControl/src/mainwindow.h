@@ -4,7 +4,6 @@
 #include "plotrenderer.h"
 
 #include <QMainWindow>
-#include <QTimer>
 #include <QVector>
 
 #include <array>
@@ -14,7 +13,6 @@ class QJsonObject;
 class QLabel;
 class QLineEdit;
 class QPushButton;
-class QSlider;
 class QSpinBox;
 
 class MainWindow final : public QMainWindow
@@ -29,8 +27,6 @@ protected:
 
 private slots:
     void toggleConnection();
-    void startSpeedTest();
-    void startPositionTest();
     void emergencyStop();
     void applyPidParameters();
     void savePidParameters();
@@ -62,7 +58,6 @@ private:
     };
 
     QByteArray makeCommand(const QString &command, qint64 value);
-    QByteArray makeTestCommand(MotorControlMode mode, quint32 commandId) const;
     bool publishCommand(const QString &command, qint64 value,
                         const QString &description);
     bool publishPidCommand(int controller, const PidValues &values);
@@ -70,10 +65,10 @@ private:
     void showMqttStatus(const QString &state, const QString &color,
                         const QString &message);
     void setConnected(bool connected, const QString &message);
-    void startTest(MotorControlMode mode);
     void saveTestImage(const QString &resultText);
     void processTestData(const QByteArray &payload);
     void finalizeReceivedTest(bool aborted, const QString &message);
+    void resetTestState();
     void updateControlAvailability();
     void setPidEditors(const std::array<PidValues, 4> &values);
     std::array<PidValues, 4> pidEditorValues() const;
@@ -92,12 +87,6 @@ private:
     QPushButton *applyPidButton_ = nullptr;
     QPushButton *savePidButton_ = nullptr;
     QPushButton *restorePidButton_ = nullptr;
-    QSlider *speedSlider_ = nullptr;
-    QLabel *speedValueLabel_ = nullptr;
-    QPushButton *speedTestButton_ = nullptr;
-    QSlider *positionSlider_ = nullptr;
-    QLabel *positionValueLabel_ = nullptr;
-    QPushButton *positionTestButton_ = nullptr;
     QPushButton *stopButton_ = nullptr;
     QLabel *testStateLabel_ = nullptr;
     QLabel *telemetryLabel_ = nullptr;
@@ -108,7 +97,6 @@ private:
 
     QVector<MotorSample> samples_;
     QVector<bool> receivedSamples_;
-    QTimer testCommandTimeoutTimer_;
     TestState testState_ = TestState::Idle;
     MotorControlMode testMode_ = MotorControlMode::Speed;
     quint32 activeTestId_ = 0U;
