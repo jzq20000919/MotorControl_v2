@@ -121,6 +121,8 @@ void motor_ui_mqtt_motor_event(lv_event_t *event);
 void motor_ui_pid_speed_test_event(lv_event_t *event);
 /** @brief 从本地 PID 测试页启动位置测试。 */
 void motor_ui_pid_position_test_event(lv_event_t *event);
+/** @brief 重新上传保留在 PSRAM 中的失败测试数据集。 */
+void motor_ui_pid_resend_event(lv_event_t *event);
 /** @brief 处理目标速度滑块事件。 @param event LVGL 事件对象。 */
 void motor_ui_speed_slider_event(lv_event_t *event);
 /** @brief 处理目标位置滑块事件。 @param event LVGL 事件对象。 */

@@ -17,6 +17,7 @@
 #define MQTT_MANAGER_WORKER_STACK_SIZE 4096U
 #define MQTT_MANAGER_WORKER_PRIORITY 4U
 #define MQTT_MANAGER_OUTBOX_LIMIT_BYTES 8192U
+#define MQTT_MANAGER_DELIVERY_HISTORY 32U
 
 typedef enum
 {
@@ -47,6 +48,15 @@ static char s_client_id[32];
 static char s_last_error[80];
 static mqtt_manager_message_callback_t s_message_callback;
 static void *s_message_callback_context;
+static int s_delivered_message_ids[MQTT_MANAGER_DELIVERY_HISTORY];
+static uint8_t s_delivered_message_cursor;
+
+/** @brief 清空当前 MQTT 客户端对应的 PUBACK 历史。调用者必须持有 s_lock。 */
+static void mqtt_manager_clear_delivery_history_locked(void)
+{
+    memset(s_delivered_message_ids, 0, sizeof(s_delivered_message_ids));
+    s_delivered_message_cursor = 0U;
+}
 
 /** @brief 获取保护 MQTT 状态和回调注册信息的互斥锁。 */
 static void mqtt_manager_lock(void)
@@ -138,6 +148,7 @@ static void mqtt_manager_event_handler(
         s_snapshot.connecting = false;
         s_snapshot.connected = true;
         s_last_error[0] = '\0';
+        mqtt_manager_clear_delivery_history_locked();
         mqtt_manager_set_status_locked("Connected - RX topic ready");
         mqtt_manager_unlock();
         if (event != NULL) {
@@ -164,6 +175,13 @@ static void mqtt_manager_event_handler(
     case MQTT_EVENT_PUBLISHED:
         mqtt_manager_lock();
         s_snapshot.transmitted_messages++;
+        if (event != NULL && event->msg_id > 0) {
+            s_delivered_message_ids[s_delivered_message_cursor] =
+                event->msg_id;
+            s_delivered_message_cursor = (uint8_t)(
+                (s_delivered_message_cursor + 1U) %
+                MQTT_MANAGER_DELIVERY_HISTORY);
+        }
         mqtt_manager_set_status_locked("Test message delivered");
         mqtt_manager_unlock();
         break;
@@ -421,6 +439,17 @@ esp_err_t mqtt_manager_publish(
     const char *topic,
     const char *payload)
 {
+    return mqtt_manager_publish_tracked(topic, payload, NULL);
+}
+
+esp_err_t mqtt_manager_publish_tracked(
+    const char *topic,
+    const char *payload,
+    int *published_message_id)
+{
+    if (published_message_id != NULL) {
+        *published_message_id = 0;
+    }
     if (topic == NULL || topic[0] == '\0' || payload == NULL) {
         return ESP_ERR_INVALID_ARG;
     }
@@ -434,14 +463,18 @@ esp_err_t mqtt_manager_publish(
     }
     esp_mqtt_client_handle_t client = s_client;
     mqtt_manager_unlock();
-    const int message_id = esp_mqtt_client_enqueue(client, topic, payload, 0, 1, 0, true);
-    if (message_id >= 0) {
+    const int queued_message_id =
+        esp_mqtt_client_enqueue(client, topic, payload, 0, 1, 0, true);
+    if (queued_message_id >= 0) {
         mqtt_manager_lock();
         mqtt_manager_set_status_locked("Test message queued");
         mqtt_manager_unlock();
     }
+    if (queued_message_id >= 0 && published_message_id != NULL) {
+        *published_message_id = queued_message_id;
+    }
     mqtt_manager_client_api_unlock();
-    return message_id >= 0 ? ESP_OK : ESP_FAIL;
+    return queued_message_id >= 0 ? ESP_OK : ESP_FAIL;
 }
 
 /** @brief 通过活动客户端排队一条 QoS 0 遥测发布消息。 */
@@ -462,7 +495,9 @@ esp_err_t mqtt_manager_publish_qos0(
     }
     esp_mqtt_client_handle_t client = s_client;
     mqtt_manager_unlock();
-    const int message_id = esp_mqtt_client_enqueue(client, topic, payload, 0, 0, 0, true);
+    /* QoS 0 遥测不得滞留在 outbox，否则弱网时会挤占测试数据空间。 */
+    const int message_id = esp_mqtt_client_enqueue(
+        client, topic, payload, 0, 0, 0, false);
     mqtt_manager_client_api_unlock();
     return message_id >= 0 ? ESP_OK : ESP_FAIL;
 }
@@ -473,6 +508,19 @@ esp_err_t mqtt_manager_publish_binary_qos1(
     const void *payload,
     size_t payload_length)
 {
+    return mqtt_manager_publish_binary_qos1_tracked(
+        topic, payload, payload_length, NULL);
+}
+
+esp_err_t mqtt_manager_publish_binary_qos1_tracked(
+    const char *topic,
+    const void *payload,
+    size_t payload_length,
+    int *published_message_id)
+{
+    if (published_message_id != NULL) {
+        *published_message_id = 0;
+    }
     if (topic == NULL || topic[0] == '\0' || payload == NULL ||
         payload_length == 0U || payload_length > INT_MAX) {
         return ESP_ERR_INVALID_ARG;
@@ -487,11 +535,31 @@ esp_err_t mqtt_manager_publish_binary_qos1(
     }
     esp_mqtt_client_handle_t client = s_client;
     mqtt_manager_unlock();
-    const int message_id = esp_mqtt_client_enqueue(
+    const int queued_message_id = esp_mqtt_client_enqueue(
         client, topic, (const char *)payload, (int)payload_length,
         1, 0, true);
+    if (queued_message_id >= 0 && published_message_id != NULL) {
+        *published_message_id = queued_message_id;
+    }
     mqtt_manager_client_api_unlock();
-    return message_id >= 0 ? ESP_OK : ESP_FAIL;
+    return queued_message_id >= 0 ? ESP_OK : ESP_FAIL;
+}
+
+bool mqtt_manager_is_message_delivered(int message_id)
+{
+    if (message_id <= 0 || s_lock == NULL) {
+        return false;
+    }
+    bool delivered = false;
+    mqtt_manager_lock();
+    for (size_t index = 0U; index < MQTT_MANAGER_DELIVERY_HISTORY; ++index) {
+        if (s_delivered_message_ids[index] == message_id) {
+            delivered = true;
+            break;
+        }
+    }
+    mqtt_manager_unlock();
+    return delivered;
 }
 
 /**

@@ -43,9 +43,18 @@ DNESP32S3B 的 N16R8 兼容模组使用 8 MB Octal PSRAM。工程在 `sdkconfig`
 `heap_caps` 分配。网关初始化时会在串口终端打印 PSRAM 总容量和剩余容量。
 
 测试运行期间暂停周期 `motor/control/telemetry` 发布；数据回传按 50 ms/块
-节流，防止 MQTT outbox 和 Wi-Fi 发送缓冲区被突发数据塞满。
+节流，并且每次只允许一个二进制分块在途。ESP32 只有收到该 QoS 1 消息的
+Broker PUBACK 后才推进上传进度，所有数据分块和最终 `complete` 状态均确认后
+才显示 `UPLOAD SUCCESS` 并释放 PSRAM，避免把“进入 MQTT outbox”误判成
+“上传成功”。普通 QoS 0 遥测使用即发即弃模式，不再占用 8 KiB outbox。
+
+如果断网、outbox 排队失败或 PUBACK 超时，页面显示具体上传错误并启用
+`RESEND`。此时电机已经停止，完整测试数据继续保留在 PSRAM 中，速度/位置
+测试按钮会保持禁用。恢复 MQTT 后点击 `RESEND`，ESP32 使用原测试 ID 从第
+0 个样本重新发送完整数据集；确认成功后才释放数据。设备重启会清除这份临时
+PSRAM 数据。
 
 PID 与测试启动相互独立。Qt 的 `set_pid` 在电机停止时更新 ESP32 运行时缓存；
 CAN 已在线时立即临时下发，否则在下一次本地测试启动前自动下发。速度、Iq、Id
-仅使用 Kp/Ki，位置使用 Kp/Ki/Kd。页面状态依次显示 `TESTING`、
-`TEST COMPLETE - UPLOADING`、`UPLOAD SUCCESS`，错误时显示具体原因。
+仅使用 Kp/Ki，位置使用 Kp/Ki/Kd。页面状态依次显示 `TESTING`、带已确认
+样本数的 `UPLOADING`、`UPLOAD SUCCESS`，错误时显示具体原因。

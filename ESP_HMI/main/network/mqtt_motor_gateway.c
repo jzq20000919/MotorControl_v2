@@ -59,7 +59,8 @@ typedef enum
     MQTT_TEST_STARTING,
     MQTT_TEST_RECORDING,
     MQTT_TEST_STOPPING,
-    MQTT_TEST_SENDING
+    MQTT_TEST_SENDING,
+    MQTT_TEST_SEND_FAILED
 } mqtt_test_stage_t;
 
 typedef struct
@@ -75,11 +76,16 @@ typedef struct
     uint32_t last_sample_sequence;
     uint16_t sample_count;
     uint16_t publish_index;
+    uint16_t pending_sample_count;
+    int pending_message_id;
+    int completion_message_id;
     int64_t next_publish_us;
     int64_t reject_check_after_us;
     uint32_t last_sample_time_us;
     bool start_issued;
     bool stop_requested;
+    uint16_t enqueue_failure_count;
+    uint16_t retry_count;
 } mqtt_test_state_t;
 
 static const char *TAG = "MQTT_MOTOR";
@@ -108,10 +114,23 @@ static void mqtt_gateway_update_test_snapshot(
         s_test_snapshot.command_id = s_test.command_id;
         s_test_snapshot.duration_ms = s_test.duration_ms;
         s_test_snapshot.sample_count = s_test.sample_count;
+        s_test_snapshot.uploaded_sample_count = s_test.publish_index;
     }
+    s_test_snapshot.resend_available =
+        state == MQTT_MOTOR_TEST_UI_UPLOAD_FAILED &&
+        s_test.samples != NULL && s_test.sample_count > 0U;
     strlcpy(s_test_snapshot.message,
             message != NULL ? message : "",
             sizeof(s_test_snapshot.message));
+    s_test_snapshot.revision++;
+    portEXIT_CRITICAL(&s_test_snapshot_lock);
+}
+
+/** @brief 将已收到 PUBACK 的采样进度同步到 PID TEST 页面。 */
+static void mqtt_gateway_update_upload_progress(void)
+{
+    portENTER_CRITICAL(&s_test_snapshot_lock);
+    s_test_snapshot.uploaded_sample_count = s_test.publish_index;
     s_test_snapshot.revision++;
     portEXIT_CRITICAL(&s_test_snapshot_lock);
 }
@@ -226,6 +245,46 @@ static bool mqtt_gateway_publish_test_status(
         s_test.last_sample_time_us, stage, message);
 }
 
+/** @brief 即发即弃地通知 Qt 上传失败，避免错误状态滞留到重发阶段。 */
+static void mqtt_gateway_publish_upload_error_qos0(const char *message)
+{
+    const uint32_t sample_period_us = s_test.sample_count > 1U
+        ? s_test.last_sample_time_us / (s_test.sample_count - 1U) : 0U;
+    char payload[256];
+    snprintf(payload, sizeof(payload),
+             "{\"id\":%lu,\"stage\":\"error\",\"mode\":%u,"
+             "\"samples\":%u,\"sample_period_us\":%lu,"
+             "\"message\":\"%s\"}",
+             (unsigned long)s_test.command_id,
+             (unsigned)s_test.mode,
+             (unsigned)s_test.sample_count,
+             (unsigned long)sample_period_us,
+             message != NULL ? message : "MQTT upload failed");
+    (void)mqtt_manager_publish_qos0(
+        MQTT_MOTOR_TEST_STATUS_TOPIC, payload);
+}
+
+/** @brief 发布可跟踪 PUBACK 的当前测试状态。 */
+static esp_err_t mqtt_gateway_publish_test_status_tracked(
+    const char *stage, const char *message, int *message_id)
+{
+    const uint32_t sample_period_us = s_test.sample_count > 1U
+        ? s_test.last_sample_time_us / (s_test.sample_count - 1U) : 0U;
+    char payload[256];
+    snprintf(payload, sizeof(payload),
+             "{\"id\":%lu,\"stage\":\"%s\",\"mode\":%u,"
+             "\"samples\":%u,\"sample_period_us\":%lu,"
+             "\"message\":\"%s\"}",
+             (unsigned long)s_test.command_id,
+             stage,
+             (unsigned)s_test.mode,
+             (unsigned)s_test.sample_count,
+             (unsigned long)sample_period_us,
+             message != NULL ? message : "");
+    return mqtt_manager_publish_tracked(
+        MQTT_MOTOR_TEST_STATUS_TOPIC, payload, message_id);
+}
+
 static bool mqtt_gateway_require_link(
     const CommMgr_ESP_State *snapshot, uint32_t command_id)
 {
@@ -310,9 +369,38 @@ static void mqtt_gateway_reset_test(void)
 static void mqtt_gateway_fail_test(const char *message)
 {
     CommMgr_ESP_Stop();
-    (void)mqtt_gateway_publish_test_status("error", message);
+    mqtt_gateway_publish_upload_error_qos0(message);
     mqtt_gateway_update_test_snapshot(MQTT_MOTOR_TEST_UI_ERROR, message);
     mqtt_gateway_reset_test();
+}
+
+/**
+ * @brief 标记 MQTT 上传失败但保留 PSRAM 数据，供页面上的 RESEND 使用。
+ *
+ * 与测试执行阶段错误不同，电机此时已经停止，CAN 状态不影响已记录的数据。
+ * 因此不能调用 mqtt_gateway_reset_test() 释放样本。
+ */
+static void mqtt_gateway_fail_upload(const char *message)
+{
+    mqtt_manager_snapshot_t mqtt_snapshot;
+    mqtt_manager_get_snapshot(&mqtt_snapshot);
+    ESP_LOGE(TAG,
+             "MQTT upload failed: %s; test_id=%lu progress=%u/%u "
+             "pending_mid=%d connected=%u mqtt_status=%s; PSRAM retained",
+             message != NULL ? message : "unknown error",
+             (unsigned long)s_test.command_id,
+             (unsigned)s_test.publish_index,
+             (unsigned)s_test.sample_count,
+             s_test.pending_message_id,
+             mqtt_snapshot.connected ? 1U : 0U,
+             mqtt_snapshot.status);
+    s_test.stage = MQTT_TEST_SEND_FAILED;
+    s_test.pending_message_id = 0;
+    s_test.pending_sample_count = 0U;
+    s_test.completion_message_id = 0;
+    mqtt_gateway_publish_upload_error_qos0(message);
+    mqtt_gateway_update_test_snapshot(
+        MQTT_MOTOR_TEST_UI_UPLOAD_FAILED, message);
 }
 
 static void mqtt_gateway_begin_test_send(int64_t now_us)
@@ -323,6 +411,10 @@ static void mqtt_gateway_begin_test_send(int64_t now_us)
     }
     s_test.stage = MQTT_TEST_SENDING;
     s_test.publish_index = 0U;
+    s_test.pending_sample_count = 0U;
+    s_test.pending_message_id = 0;
+    s_test.completion_message_id = 0;
+    s_test.enqueue_failure_count = 0U;
     s_test.next_publish_us = now_us + MQTT_GATEWAY_TEST_SEND_PERIOD_US;
     s_test.deadline_us = now_us + MQTT_GATEWAY_TEST_SEND_TIMEOUT_US;
     mqtt_gateway_update_test_snapshot(
@@ -331,7 +423,57 @@ static void mqtt_gateway_begin_test_send(int64_t now_us)
         "sending", "Sending recorded CAN samples");
 }
 
-static bool mqtt_gateway_publish_test_chunk(void)
+/** @brief 从第一个样本重新上传保留在 PSRAM 中的完整数据集。 */
+static void mqtt_gateway_retry_upload_internal(uint32_t command_id)
+{
+    if (s_test.stage != MQTT_TEST_SEND_FAILED ||
+        s_test.samples == NULL || s_test.sample_count == 0U) {
+        ESP_LOGW(TAG, "Resend rejected: no failed PSRAM dataset retained");
+        mqtt_gateway_publish_ack(
+            command_id, false, "No failed dataset is available to resend");
+        return;
+    }
+
+    mqtt_manager_snapshot_t mqtt_snapshot;
+    mqtt_manager_get_snapshot(&mqtt_snapshot);
+    if (!mqtt_snapshot.connected) {
+        ESP_LOGW(TAG,
+                 "Resend deferred: MQTT is offline; test_id=%lu samples=%u",
+                 (unsigned long)s_test.command_id,
+                 (unsigned)s_test.sample_count);
+        mqtt_gateway_update_test_snapshot(
+            MQTT_MOTOR_TEST_UI_UPLOAD_FAILED,
+            "MQTT offline - reconnect then press RESEND");
+        mqtt_gateway_publish_ack(command_id, false, "MQTT is offline");
+        return;
+    }
+
+    s_test.stage = MQTT_TEST_SENDING;
+    s_test.publish_index = 0U;
+    s_test.pending_sample_count = 0U;
+    s_test.pending_message_id = 0;
+    s_test.completion_message_id = 0;
+    s_test.enqueue_failure_count = 0U;
+    s_test.retry_count++;
+    const int64_t now_us = esp_timer_get_time();
+    s_test.next_publish_us = now_us + MQTT_GATEWAY_TEST_SEND_PERIOD_US;
+    s_test.deadline_us = now_us + MQTT_GATEWAY_TEST_SEND_TIMEOUT_US;
+
+    ESP_LOGI(TAG,
+             "Resending retained PSRAM dataset: test_id=%lu samples=%u "
+             "attempt=%u",
+             (unsigned long)s_test.command_id,
+             (unsigned)s_test.sample_count,
+             (unsigned)s_test.retry_count);
+    mqtt_gateway_update_test_snapshot(
+        MQTT_MOTOR_TEST_UI_UPLOADING,
+        "Resending retained PSRAM data");
+    mqtt_gateway_publish_ack(command_id, true, "Resend accepted");
+    (void)mqtt_gateway_publish_test_status(
+        "sending", "Resending complete retained dataset");
+}
+
+static esp_err_t mqtt_gateway_publish_test_chunk(void)
 {
     const uint16_t remaining =
         (uint16_t)(s_test.sample_count - s_test.publish_index);
@@ -383,12 +525,15 @@ static bool mqtt_gateway_publish_test_chunk(void)
 
     const size_t packet_size = MQTT_GATEWAY_TEST_HEADER_SIZE +
         (size_t)count * MQTT_GATEWAY_TEST_RECORD_SIZE;
-    if (mqtt_manager_publish_binary_qos1(
-            MQTT_MOTOR_TEST_DATA_TOPIC, packet, packet_size) != ESP_OK) {
-        return false;
+    int message_id = 0;
+    const esp_err_t result = mqtt_manager_publish_binary_qos1_tracked(
+        MQTT_MOTOR_TEST_DATA_TOPIC, packet, packet_size, &message_id);
+    if (result != ESP_OK || message_id <= 0) {
+        return result != ESP_OK ? result : ESP_FAIL;
     }
-    s_test.publish_index = (uint16_t)(s_test.publish_index + count);
-    return true;
+    s_test.pending_message_id = message_id;
+    s_test.pending_sample_count = count;
+    return ESP_OK;
 }
 
 static bool mqtt_gateway_record_sample(const CommMgr_ESP_State *snapshot)
@@ -544,40 +689,135 @@ static void mqtt_gateway_service_test(void)
         }
         break;
 
-    case MQTT_TEST_SENDING:
-        if (!snapshot.link_active) {
-            mqtt_gateway_fail_test("CAN link lost while sending data");
+    case MQTT_TEST_SENDING: {
+        mqtt_manager_snapshot_t mqtt_snapshot;
+        mqtt_manager_get_snapshot(&mqtt_snapshot);
+
+        /* 每次只允许一个数据分块等待 PUBACK，避免 8 KiB outbox 被填满。 */
+        if (s_test.pending_message_id > 0) {
+            if (mqtt_manager_is_message_delivered(
+                    s_test.pending_message_id)) {
+                s_test.publish_index = (uint16_t)(
+                    s_test.publish_index + s_test.pending_sample_count);
+                ESP_LOGD(TAG,
+                         "MQTT chunk PUBACK mid=%d progress=%u/%u",
+                         s_test.pending_message_id,
+                         (unsigned)s_test.publish_index,
+                         (unsigned)s_test.sample_count);
+                s_test.pending_message_id = 0;
+                s_test.pending_sample_count = 0U;
+                s_test.enqueue_failure_count = 0U;
+                s_test.next_publish_us =
+                    now_us + MQTT_GATEWAY_TEST_SEND_PERIOD_US;
+                s_test.deadline_us =
+                    now_us + MQTT_GATEWAY_TEST_SEND_TIMEOUT_US;
+                mqtt_gateway_update_upload_progress();
+            } else if (now_us >= s_test.deadline_us) {
+                mqtt_gateway_fail_upload(
+                    mqtt_snapshot.connected
+                        ? "MQTT data PUBACK timed out - press RESEND"
+                        : "MQTT disconnected during upload - press RESEND");
+            }
             break;
         }
-        if (snapshot.motor_fault) {
-            mqtt_gateway_fail_test("STM32 fault while sending data");
-            break;
-        }
+
         if (s_test.publish_index < s_test.sample_count) {
             if (now_us >= s_test.next_publish_us) {
-                (void)mqtt_gateway_publish_test_chunk();
+                esp_err_t publish_result = ESP_ERR_INVALID_STATE;
+                if (mqtt_snapshot.connected) {
+                    publish_result = mqtt_gateway_publish_test_chunk();
+                }
+                if (publish_result != ESP_OK) {
+                    s_test.enqueue_failure_count++;
+                    if (s_test.enqueue_failure_count == 1U ||
+                        (s_test.enqueue_failure_count % 20U) == 0U) {
+                        ESP_LOGW(TAG,
+                                 "MQTT chunk enqueue failed: %s; "
+                                 "progress=%u/%u connected=%u status=%s",
+                                 esp_err_to_name(publish_result),
+                                 (unsigned)s_test.publish_index,
+                                 (unsigned)s_test.sample_count,
+                                 mqtt_snapshot.connected ? 1U : 0U,
+                                 mqtt_snapshot.status);
+                    }
+                } else {
+                    s_test.enqueue_failure_count = 0U;
+                    s_test.deadline_us =
+                        now_us + MQTT_GATEWAY_TEST_SEND_TIMEOUT_US;
+                }
                 s_test.next_publish_us =
                     now_us + MQTT_GATEWAY_TEST_SEND_PERIOD_US;
             }
-        } else if (now_us >= s_test.next_publish_us) {
-                if (mqtt_gateway_publish_test_status(
-                    "complete",
-                    s_test.stop_requested
-                        ? "Stopped test dataset sent"
-                        : "CAN dataset sent")) {
+            if (s_test.stage == MQTT_TEST_SENDING &&
+                now_us >= s_test.deadline_us) {
+                mqtt_gateway_fail_upload(
+                    mqtt_snapshot.connected
+                        ? "MQTT outbox remained busy - press RESEND"
+                        : "MQTT reconnect timed out - press RESEND");
+            }
+            break;
+        }
+
+        /* complete 状态同样必须收到 PUBACK 后才允许释放 PSRAM。 */
+        if (s_test.completion_message_id > 0) {
+            if (mqtt_manager_is_message_delivered(
+                    s_test.completion_message_id)) {
+                ESP_LOGI(TAG,
+                         "MQTT test upload confirmed by broker: "
+                         "test_id=%lu samples=%u retries=%u",
+                         (unsigned long)s_test.command_id,
+                         (unsigned)s_test.sample_count,
+                         (unsigned)s_test.retry_count);
                 mqtt_gateway_update_test_snapshot(
                     MQTT_MOTOR_TEST_UI_UPLOAD_SUCCESS,
                     "Upload successful");
                 mqtt_gateway_reset_test();
-            } else {
-                s_test.next_publish_us =
-                    now_us + MQTT_GATEWAY_TEST_SEND_PERIOD_US;
+            } else if (now_us >= s_test.deadline_us) {
+                mqtt_gateway_fail_upload(
+                    "MQTT completion PUBACK timed out - press RESEND");
             }
+            break;
+        }
+
+        if (now_us >= s_test.next_publish_us) {
+            int message_id = 0;
+            const esp_err_t result = mqtt_snapshot.connected
+                ? mqtt_gateway_publish_test_status_tracked(
+                      "complete",
+                      s_test.stop_requested
+                          ? "Stopped test dataset sent"
+                          : "CAN dataset sent",
+                      &message_id)
+                : ESP_ERR_INVALID_STATE;
+            if (result == ESP_OK && message_id > 0) {
+                s_test.completion_message_id = message_id;
+                s_test.deadline_us =
+                    now_us + MQTT_GATEWAY_TEST_SEND_TIMEOUT_US;
+            } else {
+                s_test.enqueue_failure_count++;
+                if (s_test.enqueue_failure_count == 1U ||
+                    (s_test.enqueue_failure_count % 20U) == 0U) {
+                    ESP_LOGW(TAG,
+                             "MQTT completion enqueue failed: %s; "
+                             "connected=%u status=%s",
+                             esp_err_to_name(result),
+                             mqtt_snapshot.connected ? 1U : 0U,
+                             mqtt_snapshot.status);
+                }
+            }
+            s_test.next_publish_us =
+                now_us + MQTT_GATEWAY_TEST_SEND_PERIOD_US;
         }
         if (s_test.stage == MQTT_TEST_SENDING &&
             now_us >= s_test.deadline_us) {
-            mqtt_gateway_fail_test("MQTT test data send timed out");
+            mqtt_gateway_fail_upload(
+                "MQTT completion send timed out - press RESEND");
         }
+        break;
+    }
+
+    case MQTT_TEST_SEND_FAILED:
+        /* PSRAM 数据保持不动，直到用户点击 RESEND 或设备重启。 */
         break;
 
     case MQTT_TEST_IDLE:
@@ -735,6 +975,16 @@ static void mqtt_gateway_process_command(
             mqtt_gateway_publish_ack(
                 command_id, false,
                 "Start tests from the ESP32 PID TEST page");
+        }
+        return;
+    }
+    if (strcmp(command, "retry_upload") == 0) {
+        if (local) {
+            mqtt_gateway_retry_upload_internal(command_id);
+        } else {
+            mqtt_gateway_publish_ack(
+                command_id, false,
+                "Retry uploads from the ESP32 PID TEST page");
         }
         return;
     }
@@ -915,13 +1165,16 @@ static void mqtt_gateway_task(void *argument)
             mqtt_gateway_process_command(command.payload, command.local);
         }
         mqtt_gateway_service_test();
-        if (s_test.stage == MQTT_TEST_IDLE &&
+        const bool telemetry_allowed =
+            s_test.stage == MQTT_TEST_IDLE ||
+            s_test.stage == MQTT_TEST_SEND_FAILED;
+        if (telemetry_allowed &&
             xTaskGetTickCount() - last_publish >=
             pdMS_TO_TICKS(MQTT_GATEWAY_TELEMETRY_PERIOD_MS)) {
             last_publish = xTaskGetTickCount();
             mqtt_gateway_publish_telemetry();
-        } else if (s_test.stage != MQTT_TEST_IDLE) {
-            /* 测试期间 CAN 样本只进入 RAM，停机后才通过 MQTT 回传。 */
+        } else if (!telemetry_allowed) {
+            /* 采样/上传期间暂停遥测；CAN 样本只进入 PSRAM。 */
             last_publish = xTaskGetTickCount();
         }
     }
@@ -941,7 +1194,8 @@ esp_err_t mqtt_motor_gateway_start_local_test(
     portENTER_CRITICAL(&s_test_snapshot_lock);
     const bool busy =
         s_test_snapshot.state == MQTT_MOTOR_TEST_UI_TESTING ||
-        s_test_snapshot.state == MQTT_MOTOR_TEST_UI_UPLOADING;
+        s_test_snapshot.state == MQTT_MOTOR_TEST_UI_UPLOADING ||
+        s_test_snapshot.resend_available;
     if (busy) {
         portEXIT_CRITICAL(&s_test_snapshot_lock);
         return ESP_ERR_INVALID_STATE;
@@ -952,6 +1206,8 @@ esp_err_t mqtt_motor_gateway_start_local_test(
     s_test_snapshot.command_id = command_id;
     s_test_snapshot.duration_ms = MQTT_MOTOR_LOCAL_TEST_DURATION_MS;
     s_test_snapshot.sample_count = 0U;
+    s_test_snapshot.uploaded_sample_count = 0U;
+    s_test_snapshot.resend_available = false;
     strlcpy(s_test_snapshot.message, "Preparing local test",
             sizeof(s_test_snapshot.message));
     s_test_snapshot.revision++;
@@ -969,6 +1225,44 @@ esp_err_t mqtt_motor_gateway_start_local_test(
     if (xQueueSendToFront(s_command_queue, &command, 0U) != pdTRUE) {
         mqtt_gateway_update_test_snapshot(
             MQTT_MOTOR_TEST_UI_ERROR, "Test request queue is full");
+        return ESP_ERR_TIMEOUT;
+    }
+    return ESP_OK;
+}
+
+esp_err_t mqtt_motor_gateway_retry_upload(void)
+{
+    if (s_command_queue == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    uint32_t command_id = 0U;
+    portENTER_CRITICAL(&s_test_snapshot_lock);
+    if (!s_test_snapshot.resend_available ||
+        s_test_snapshot.command_id == 0U) {
+        portEXIT_CRITICAL(&s_test_snapshot_lock);
+        return ESP_ERR_INVALID_STATE;
+    }
+    command_id = s_test_snapshot.command_id;
+    s_test_snapshot.state = MQTT_MOTOR_TEST_UI_UPLOADING;
+    s_test_snapshot.resend_available = false;
+    strlcpy(s_test_snapshot.message, "Resend queued",
+            sizeof(s_test_snapshot.message));
+    s_test_snapshot.revision++;
+    portEXIT_CRITICAL(&s_test_snapshot_lock);
+
+    mqtt_gateway_command_t command = {.local = true};
+    snprintf(command.payload, sizeof(command.payload),
+             "{\"id\":%lu,\"cmd\":\"retry_upload\"}",
+             (unsigned long)command_id);
+    if (xQueueSendToFront(s_command_queue, &command, 0U) != pdTRUE) {
+        portENTER_CRITICAL(&s_test_snapshot_lock);
+        s_test_snapshot.state = MQTT_MOTOR_TEST_UI_UPLOAD_FAILED;
+        s_test_snapshot.resend_available = true;
+        strlcpy(s_test_snapshot.message, "Resend request queue is full",
+                sizeof(s_test_snapshot.message));
+        s_test_snapshot.revision++;
+        portEXIT_CRITICAL(&s_test_snapshot_lock);
         return ESP_ERR_TIMEOUT;
     }
     return ESP_OK;

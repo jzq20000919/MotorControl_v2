@@ -59,6 +59,11 @@ esp_err_t mqtt_manager_disconnect_async(void);
 esp_err_t mqtt_manager_publish(
     const char *topic,
     const char *payload);
+/** @brief 发布 QoS 1 文本并返回可用于查询 PUBACK 的消息 ID。 */
+esp_err_t mqtt_manager_publish_tracked(
+    const char *topic,
+    const char *payload,
+    int *message_id);
 /**
  * @brief 发布一条即发即弃的 QoS 0 消息。
  * @param topic 目标主题。
@@ -73,6 +78,14 @@ esp_err_t mqtt_manager_publish_binary_qos1(
     const char *topic,
     const void *payload,
     size_t payload_length);
+/** @brief 发布 QoS 1 二进制数据并返回可用于查询 PUBACK 的消息 ID。 */
+esp_err_t mqtt_manager_publish_binary_qos1_tracked(
+    const char *topic,
+    const void *payload,
+    size_t payload_length,
+    int *message_id);
+/** @brief 查询指定 QoS 1 消息是否已经收到 Broker PUBACK。 */
+bool mqtt_manager_is_message_delivered(int message_id);
 /**
  * @brief 注册接收完整 MQTT 入站消息的应用回调。
  * @param callback 消息回调；传 NULL 可取消注册。

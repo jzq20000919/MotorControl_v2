@@ -341,6 +341,21 @@ void motor_ui_pid_position_test_event(lv_event_t *event)
     }
 }
 
+/** @brief 重新排队上传 ESP32 PSRAM 中保留的完整测试数据集。 */
+void motor_ui_pid_resend_event(lv_event_t *event)
+{
+    (void)event;
+    const esp_err_t result = mqtt_motor_gateway_retry_upload();
+    if (result == ESP_OK) {
+        lv_label_set_text(
+            s_context.pid_test_state_label, "RESEND QUEUED");
+    } else {
+        lv_label_set_text_fmt(
+            s_context.pid_test_state_label,
+            "RESEND FAILED: %s", esp_err_to_name(result));
+    }
+}
+
 /** @brief 更新速度滑块文本，并在释放时提交最终转速。 */
 void motor_ui_speed_slider_event(lv_event_t *event)
 {

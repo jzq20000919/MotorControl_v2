@@ -73,6 +73,7 @@ static lv_obj_t *s_pid_test_config_label;
 static lv_obj_t *s_pid_test_state_label;
 static lv_obj_t *s_pid_speed_test_button;
 static lv_obj_t *s_pid_position_test_button;
+static lv_obj_t *s_pid_resend_button;
 static lv_obj_t *s_stop_button;
 static lv_obj_t *s_speed_stop_button;
 static lv_obj_t *s_position_stop_button;
@@ -696,10 +697,24 @@ static void ui_create_pid_test_page(lv_obj_t *parent)
         status_panel, "TEST STATUS", UI_COLOR_MUTED,
         &lv_font_montserrat_12);
     lv_obj_set_pos(label, 0, 0);
+
+    s_pid_resend_button = lv_button_create(status_panel);
+    lv_obj_set_size(s_pid_resend_button, 88, 26);
+    lv_obj_set_pos(s_pid_resend_button, 198, -2);
+    motor_ui_style_button(s_pid_resend_button, UI_COLOR_BLUE, 7);
+    lv_obj_add_event_cb(
+        s_pid_resend_button, motor_ui_pid_resend_event,
+        LV_EVENT_CLICKED, NULL);
+    lv_obj_add_state(s_pid_resend_button, LV_STATE_DISABLED);
+    label = ui_create_label(
+        s_pid_resend_button, "RESEND", UI_COLOR_TEXT,
+        &lv_font_montserrat_12);
+    lv_obj_center(label);
+
     s_pid_test_state_label = ui_create_label(
         status_panel, "READY", UI_COLOR_GREEN,
         &lv_font_montserrat_14);
-    lv_obj_set_pos(s_pid_test_state_label, 0, 20);
+    lv_obj_set_pos(s_pid_test_state_label, 0, 27);
     lv_obj_set_width(s_pid_test_state_label, 286);
     lv_label_set_long_mode(
         s_pid_test_state_label, LV_LABEL_LONG_WRAP);
@@ -1059,7 +1074,8 @@ static void ui_update_pid_test_data(void)
 
     const bool busy =
         snapshot.state == MQTT_MOTOR_TEST_UI_TESTING ||
-        snapshot.state == MQTT_MOTOR_TEST_UI_UPLOADING;
+        snapshot.state == MQTT_MOTOR_TEST_UI_UPLOADING ||
+        snapshot.resend_available;
     if (busy) {
         lv_obj_add_state(s_pid_speed_test_button, LV_STATE_DISABLED);
         lv_obj_add_state(s_pid_position_test_button, LV_STATE_DISABLED);
@@ -1067,8 +1083,14 @@ static void ui_update_pid_test_data(void)
         lv_obj_remove_state(s_pid_speed_test_button, LV_STATE_DISABLED);
         lv_obj_remove_state(s_pid_position_test_button, LV_STATE_DISABLED);
     }
+    if (snapshot.resend_available) {
+        lv_obj_remove_state(s_pid_resend_button, LV_STATE_DISABLED);
+    } else {
+        lv_obj_add_state(s_pid_resend_button, LV_STATE_DISABLED);
+    }
 
     const char *state_text = "READY";
+    char state_buffer[80];
     motor_ui_style_color_t color = UI_COLOR_MUTED;
     switch (snapshot.state) {
     case MQTT_MOTOR_TEST_UI_TESTING:
@@ -1076,12 +1098,21 @@ static void ui_update_pid_test_data(void)
         color = UI_COLOR_YELLOW;
         break;
     case MQTT_MOTOR_TEST_UI_UPLOADING:
-        state_text = "TEST COMPLETE - UPLOADING";
+        snprintf(state_buffer, sizeof(state_buffer),
+                 "UPLOADING %u/%u",
+                 (unsigned)snapshot.uploaded_sample_count,
+                 (unsigned)snapshot.sample_count);
+        state_text = state_buffer;
         color = UI_COLOR_CYAN;
         break;
     case MQTT_MOTOR_TEST_UI_UPLOAD_SUCCESS:
         state_text = "UPLOAD SUCCESS";
         color = UI_COLOR_GREEN;
+        break;
+    case MQTT_MOTOR_TEST_UI_UPLOAD_FAILED:
+        state_text = snapshot.message[0] != '\0'
+            ? snapshot.message : "UPLOAD FAILED - PRESS RESEND";
+        color = UI_COLOR_RED;
         break;
     case MQTT_MOTOR_TEST_UI_ERROR:
         state_text = snapshot.message[0] != '\0'

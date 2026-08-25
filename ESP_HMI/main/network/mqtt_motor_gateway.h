@@ -1,6 +1,7 @@
 #ifndef MQTT_MOTOR_GATEWAY_H
 #define MQTT_MOTOR_GATEWAY_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -31,6 +32,7 @@ typedef enum
     MQTT_MOTOR_TEST_UI_TESTING,
     MQTT_MOTOR_TEST_UI_UPLOADING,
     MQTT_MOTOR_TEST_UI_UPLOAD_SUCCESS,
+    MQTT_MOTOR_TEST_UI_UPLOAD_FAILED,
     MQTT_MOTOR_TEST_UI_ERROR
 } mqtt_motor_test_ui_state_t;
 
@@ -42,6 +44,8 @@ typedef struct
     uint32_t command_id;
     uint32_t duration_ms;
     uint16_t sample_count;
+    uint16_t uploaded_sample_count;
+    bool resend_available;
     int16_t pid[4][3];
     uint32_t revision;
     char message[80];
@@ -56,6 +60,9 @@ esp_err_t mqtt_motor_gateway_init(void);
 /** @brief 从 ESP32 本地界面排队启动一次速度或位置 PID 测试。 */
 esp_err_t mqtt_motor_gateway_start_local_test(
     mqtt_motor_local_test_mode_t mode);
+
+/** @brief 重新发送因 MQTT 故障而保留在 PSRAM 中的完整测试数据集。 */
+esp_err_t mqtt_motor_gateway_retry_upload(void);
 
 /** @brief 获取当前测试状态和运行时 PID 参数快照。 */
 void mqtt_motor_gateway_get_test_snapshot(
