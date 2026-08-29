@@ -3,8 +3,7 @@
 #include <QByteArray>
 #include <QObject>
 #include <QString>
-#include <QTcpSocket>
-#include <QTimer>
+#include <QMqttClient>
 
 class MqttClient final : public QObject
 {
@@ -26,25 +25,8 @@ signals:
     void messageReceived(const QString &topic, const QByteArray &payload);
     void errorOccurred(const QString &message);
 
-private slots:
-    void onTcpConnected();
-    void onTcpDisconnected();
-    void onReadyRead();
-    void sendPing();
-
 private:
-    static void appendMqttString(QByteArray &target, const QByteArray &value);
-    static QByteArray encodeRemainingLength(qsizetype length);
-    bool sendPacket(quint8 header, const QByteArray &body);
-    quint16 nextPacketId();
-    void processInput();
-    void processPacket(quint8 header, const QByteArray &body);
-    void processPublish(quint8 header, const QByteArray &body);
+    static QString errorMessage(QMqttClient::ClientError error);
 
-    QTcpSocket socket_;
-    QTimer keepAliveTimer_;
-    QByteArray inputBuffer_;
-    QString clientId_;
-    bool mqttConnected_ = false;
-    quint16 packetId_ = 0U;
+    QMqttClient client_;
 };

@@ -70,5 +70,7 @@ cmake -S QtMqttSimpleControl -B QtMqttSimpleControl/build `
 cmake --build QtMqttSimpleControl/build
 ```
 
-程序只依赖 Qt 6 的 `Network`、`Widgets` 和 QtGui 内置图像绘制能力，不依赖
-Qt Charts。
+程序依赖 Qt 6 的 `Mqtt`、`Widgets` 和 QtGui 内置图像绘制能力，不依赖
+Qt Charts。构建前须为当前 Qt 版本和编译器套件安装官方 **Qt MQTT**；如果
+Maintenance Tool 未提供该组件，可使用 Qt 官方 `qtmqtt` 同版本源码构建安装。
+Qt 端的架构、消息流和功能说明见 [QT_MQTT_DESIGN.md](QT_MQTT_DESIGN.md)。

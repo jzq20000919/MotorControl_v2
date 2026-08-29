@@ -347,26 +347,25 @@ esp_err_t mqtt_manager_init(void)
 {
     if (s_lock != NULL) {
         return ESP_OK;
-    }
+    }//检查锁是否存在，如果存在就可能初始化过了，则不需要初始化
 
-    uint8_t station_mac[6];
-    const esp_err_t mac_result =
-        esp_read_mac(station_mac, ESP_MAC_WIFI_STA);
+    uint8_t station_mac[6];//创建一个mac变量存放ESP32的mac地址
+    const esp_err_t mac_result =esp_read_mac(station_mac, ESP_MAC_WIFI_STA);//读取WIFI-STA的mac地址
     if (mac_result != ESP_OK) {
         return mac_result;
     }
 
-    s_lock = xSemaphoreCreateMutex();
+    s_lock = xSemaphoreCreateMutex();//创建一个锁
     s_client_api_lock = xSemaphoreCreateMutex();
-    s_command_queue = xQueueCreate(MQTT_MANAGER_COMMAND_QUEUE_LENGTH, sizeof(mqtt_manager_command_t));
+    s_command_queue = xQueueCreate(MQTT_MANAGER_COMMAND_QUEUE_LENGTH, sizeof(mqtt_manager_command_t));//创建RTOS消息队列，存放命令
     if (s_lock == NULL || s_client_api_lock == NULL ||
         s_command_queue == NULL) {
         return ESP_ERR_NO_MEM;
     }
 
     memset(&s_snapshot, 0, sizeof(s_snapshot));
-    snprintf(s_client_id, sizeof(s_client_id), "esp32s3-motor-%02X%02X%02X%02X%02X%02X", station_mac[0], station_mac[1], station_mac[2], station_mac[3], station_mac[4], station_mac[5]);
-    s_snapshot.initialized = true;
+    snprintf(s_client_id, sizeof(s_client_id), "esp32s3-motor-%02X%02X%02X%02X%02X%02X", station_mac[0], station_mac[1], station_mac[2], station_mac[3], station_mac[4], station_mac[5]);//生成s_client_id
+    s_snapshot.initialized = true;//MQTT准备好了，未开始连接
     strlcpy(s_snapshot.status, "Ready - enter broker URI", sizeof(s_snapshot.status));
     ESP_LOGI(TAG, "MQTT client ID: %s", s_client_id);
 
@@ -374,7 +373,7 @@ esp_err_t mqtt_manager_init(void)
         s_snapshot.initialized = false;
         strlcpy(s_snapshot.status, "MQTT worker allocation failed", sizeof(s_snapshot.status));
         return ESP_ERR_NO_MEM;
-    }
+    }//创建MQTT worker RTOS Task
     return ESP_OK;
 }
 

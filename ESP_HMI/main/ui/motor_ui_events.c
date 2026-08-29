@@ -286,34 +286,6 @@ static void ui_mqtt_publish_test(const char *topic, const char *payload)
     }
 }
 
-/** @brief 发布 MQTT 连通性测试消息。 */
-void motor_ui_mqtt_ping_event(lv_event_t *event)
-{
-    (void)event;
-    ui_mqtt_publish_test("motor/hmi/test/ping", "PING from ESP32-S3");
-}
-
-/** @brief 发布当前 Wi-Fi 状态测试消息。 */
-void motor_ui_mqtt_wifi_event(lv_event_t *event)
-{
-    (void)event;
-    wifi_manager_snapshot_t snapshot;
-    wifi_manager_get_snapshot(&snapshot);
-    char payload[128];
-    snprintf(payload, sizeof(payload), "ssid=%s ip=%s", snapshot.ssid, snapshot.ip_address);
-    ui_mqtt_publish_test("motor/hmi/test/wifi", payload);
-}
-
-/** @brief 发布当前电机状态测试消息。 */
-void motor_ui_mqtt_motor_event(lv_event_t *event)
-{
-    (void)event;
-    CommMgr_ESP_State snapshot;
-    CommMgr_ESP_GetState(&snapshot);
-    char payload[160];
-    snprintf(payload, sizeof(payload), "running=%u mode=%s speed=%d position=%u.%02u", snapshot.motor_running ? 1U : 0U, snapshot.mode == COMM_MGR_ESP_MODE_SPEED ? "speed" : "position", snapshot.measured_speed_rpm, snapshot.current_position_cdeg / 100U, snapshot.current_position_cdeg % 100U);
-    ui_mqtt_publish_test("motor/hmi/test/motor", payload);
-}
 
 /** @brief 从 ESP32 本地界面排队启动固定 500 RPM、7 秒速度测试。 */
 void motor_ui_pid_speed_test_event(lv_event_t *event)

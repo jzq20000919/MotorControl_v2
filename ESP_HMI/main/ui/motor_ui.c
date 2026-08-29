@@ -626,9 +626,7 @@ static void ui_create_mqtt_page(lv_obj_t *parent)
     lv_obj_set_width(s_mqtt_page_state_label, 300);
     lv_label_set_long_mode(s_mqtt_page_state_label, LV_LABEL_LONG_DOT);
 
-    ui_create_wifi_action_button(parent, "PING", UI_COLOR_CYAN, 8, 104, motor_ui_mqtt_ping_event);
-    ui_create_wifi_action_button(parent, "WI-FI INFO", UI_COLOR_CYAN, 114, 104, motor_ui_mqtt_wifi_event);
-    ui_create_wifi_action_button(parent, "MOTOR", UI_COLOR_CYAN, 220, 104, motor_ui_mqtt_motor_event);
+
 
     s_mqtt_rx_label = ui_create_label(parent, "RX motor/hmi/test/rx\nNo message from MQTTX", UI_COLOR_MUTED, &lv_font_montserrat_12);
     lv_obj_set_pos(s_mqtt_rx_label, 10, 149);
