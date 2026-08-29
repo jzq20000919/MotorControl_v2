@@ -18,6 +18,8 @@
 #define MQTT_MANAGER_WORKER_PRIORITY 4U
 #define MQTT_MANAGER_OUTBOX_LIMIT_BYTES 8192U
 #define MQTT_MANAGER_DELIVERY_HISTORY 32U
+#define MQTT_MANAGER_TOPIC_MAX_LEN 63U
+#define MQTT_MANAGER_PAYLOAD_MAX_LEN 511U
 
 typedef enum
 {
@@ -46,6 +48,8 @@ static mqtt_manager_snapshot_t s_snapshot;
 static char s_active_uri[MQTT_MANAGER_URI_MAX_LEN + 1U];
 static char s_client_id[32];
 static char s_last_error[80];
+static char s_incoming_topic[MQTT_MANAGER_TOPIC_MAX_LEN + 1U];
+static char s_incoming_payload[MQTT_MANAGER_PAYLOAD_MAX_LEN + 1U];
 static mqtt_manager_message_callback_t s_message_callback;
 static void *s_message_callback_context;
 static int s_delivered_message_ids[MQTT_MANAGER_DELIVERY_HISTORY];
@@ -149,10 +153,9 @@ static void mqtt_manager_event_handler(
         s_snapshot.connected = true;
         s_last_error[0] = '\0';
         mqtt_manager_clear_delivery_history_locked();
-        mqtt_manager_set_status_locked("Connected - RX topic ready");
+        mqtt_manager_set_status_locked("Connected");
         mqtt_manager_unlock();
         if (event != NULL) {
-            (void)esp_mqtt_client_subscribe(event->client, MQTT_MANAGER_TEST_RX_TOPIC, 1);
             (void)esp_mqtt_client_subscribe(event->client, MQTT_MANAGER_CONTROL_TOPIC, 1);
         }
         ESP_LOGI(TAG, "Connected to %s", s_active_uri);
@@ -174,7 +177,6 @@ static void mqtt_manager_event_handler(
 
     case MQTT_EVENT_PUBLISHED:
         mqtt_manager_lock();
-        s_snapshot.transmitted_messages++;
         if (event != NULL && event->msg_id > 0) {
             s_delivered_message_ids[s_delivered_message_cursor] =
                 event->msg_id;
@@ -182,7 +184,6 @@ static void mqtt_manager_event_handler(
                 (s_delivered_message_cursor + 1U) %
                 MQTT_MANAGER_DELIVERY_HISTORY);
         }
-        mqtt_manager_set_status_locked("Test message delivered");
         mqtt_manager_unlock();
         break;
 
@@ -197,28 +198,30 @@ static void mqtt_manager_event_handler(
         char completed_payload[MQTT_MANAGER_PAYLOAD_MAX_LEN + 1U];
         mqtt_manager_lock();
         if (event->current_data_offset == 0) {
-            mqtt_manager_copy_event_text(s_snapshot.last_topic, sizeof(s_snapshot.last_topic), event->topic, event->topic_len);
-            s_snapshot.last_payload[0] = '\0';
+            mqtt_manager_copy_event_text(
+                s_incoming_topic, sizeof(s_incoming_topic),
+                event->topic, event->topic_len);
+            s_incoming_payload[0] = '\0';
         }
         if (event->data != NULL && event->data_len > 0 &&
             event->current_data_offset <
-                (int)sizeof(s_snapshot.last_payload) - 1) {
+                (int)sizeof(s_incoming_payload) - 1) {
             size_t offset = (size_t)event->current_data_offset;
             size_t length = (size_t)event->data_len;
             const size_t available =
-                sizeof(s_snapshot.last_payload) - 1U - offset;
+                sizeof(s_incoming_payload) - 1U - offset;
             if (length > available) {
                 length = available;
             }
-            memcpy(s_snapshot.last_payload + offset, event->data, length);
-            s_snapshot.last_payload[offset + length] = '\0';
+            memcpy(s_incoming_payload + offset, event->data, length);
+            s_incoming_payload[offset + length] = '\0';
         }
         if (event->current_data_offset + event->data_len >=
             event->total_data_len) {
-            s_snapshot.received_messages++;
-            mqtt_manager_set_status_locked("Message received");
-            strlcpy(completed_topic, s_snapshot.last_topic, sizeof(completed_topic));
-            strlcpy(completed_payload, s_snapshot.last_payload, sizeof(completed_payload));
+            strlcpy(completed_topic, s_incoming_topic,
+                    sizeof(completed_topic));
+            strlcpy(completed_payload, s_incoming_payload,
+                    sizeof(completed_payload));
             callback = s_message_callback;
             callback_context = s_message_callback_context;
             message_complete = true;
@@ -464,11 +467,6 @@ esp_err_t mqtt_manager_publish_tracked(
     mqtt_manager_unlock();
     const int queued_message_id =
         esp_mqtt_client_enqueue(client, topic, payload, 0, 1, 0, true);
-    if (queued_message_id >= 0) {
-        mqtt_manager_lock();
-        mqtt_manager_set_status_locked("Test message queued");
-        mqtt_manager_unlock();
-    }
     if (queued_message_id >= 0 && published_message_id != NULL) {
         *published_message_id = queued_message_id;
     }
@@ -499,16 +497,6 @@ esp_err_t mqtt_manager_publish_qos0(
         client, topic, payload, 0, 0, 0, false);
     mqtt_manager_client_api_unlock();
     return message_id >= 0 ? ESP_OK : ESP_FAIL;
-}
-
-/** @brief 通过活动客户端排队一条带显式长度的 QoS 1 二进制消息。 */
-esp_err_t mqtt_manager_publish_binary_qos1(
-    const char *topic,
-    const void *payload,
-    size_t payload_length)
-{
-    return mqtt_manager_publish_binary_qos1_tracked(
-        topic, payload, payload_length, NULL);
 }
 
 esp_err_t mqtt_manager_publish_binary_qos1_tracked(
@@ -575,7 +563,7 @@ void mqtt_manager_set_message_callback(
     mqtt_manager_unlock();
 }
 
-/** @brief 在管理器互斥锁保护下复制当前 MQTT 状态和流量计数。 */
+/** @brief 在管理器互斥锁保护下复制当前 MQTT 连接状态。 */
 void mqtt_manager_get_snapshot(mqtt_manager_snapshot_t *snapshot)
 {
     if (snapshot == NULL) {

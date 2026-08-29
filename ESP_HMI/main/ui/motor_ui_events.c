@@ -1,6 +1,5 @@
 #include "motor_ui_events.h"
 
-#include <stdio.h>
 #include <string.h>
 
 #include "esp_err.h"
@@ -277,15 +276,6 @@ void motor_ui_mqtt_disconnect_event(lv_event_t *event)
         lv_label_set_text_fmt(s_context.mqtt_page_state_label, "Disconnect failed: %s", esp_err_to_name(result));
     }
 }
-
-/** @brief 发布测试消息并在失败时更新 MQTT 页面状态。 */
-static void ui_mqtt_publish_test(const char *topic, const char *payload)
-{
-    if (mqtt_manager_publish(topic, payload) != ESP_OK) {
-        lv_label_set_text(s_context.mqtt_page_state_label, "MQTT is offline - connect first");
-    }
-}
-
 
 /** @brief 从 ESP32 本地界面排队启动固定 500 RPM、7 秒速度测试。 */
 void motor_ui_pid_speed_test_event(lv_event_t *event)

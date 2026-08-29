@@ -21,7 +21,6 @@
 #define MQTT_GATEWAY_TASK_STACK_SIZE       6144U
 #define MQTT_GATEWAY_TASK_PRIORITY         5U
 #define MQTT_GATEWAY_TELEMETRY_PERIOD_MS   250U
-#define MQTT_GATEWAY_DEFAULT_UART_BAUD     115200U
 #define MQTT_GATEWAY_SPEED_LIMIT_RPM       2600
 #define MQTT_GATEWAY_TEST_DURATION_MS      7000U
 #define MQTT_GATEWAY_TEST_MAX_SAMPLES      3600U
@@ -172,18 +171,6 @@ static void mqtt_gateway_apply_cached_pid(void)
                 COMM_MGR_ESP_PID_KD, pid[controller][2]);
         }
     }
-}
-
-static int32_t mqtt_gateway_clamp_i32(
-    int32_t value, int32_t minimum, int32_t maximum)
-{
-    if (value < minimum) {
-        return minimum;
-    }
-    if (value > maximum) {
-        return maximum;
-    }
-    return value;
 }
 
 static void mqtt_gateway_write_u16(uint8_t *data, uint16_t value)
@@ -958,8 +945,6 @@ static void mqtt_gateway_process_command(
 {
     char command[32];
     int32_t id_value = 0;
-    int32_t value = 0;
-    const bool has_value = mqtt_gateway_json_int(payload, "value", &value);
     (void)mqtt_gateway_json_int(payload, "id", &id_value);
     const uint32_t command_id = id_value > 0 ? (uint32_t)id_value : 0U;
 
@@ -968,23 +953,14 @@ static void mqtt_gateway_process_command(
         mqtt_gateway_publish_ack(command_id, false, "Missing command");
         return;
     }
-    if (strcmp(command, "run_test") == 0) {
-        if (local) {
+    if (local) {
+        if (strcmp(command, "run_test") == 0) {
             mqtt_gateway_start_test(payload, command_id);
-        } else {
-            mqtt_gateway_publish_ack(
-                command_id, false,
-                "Start tests from the ESP32 PID TEST page");
-        }
-        return;
-    }
-    if (strcmp(command, "retry_upload") == 0) {
-        if (local) {
+        } else if (strcmp(command, "retry_upload") == 0) {
             mqtt_gateway_retry_upload_internal(command_id);
         } else {
             mqtt_gateway_publish_ack(
-                command_id, false,
-                "Retry uploads from the ESP32 PID TEST page");
+                command_id, false, "Unknown local command");
         }
         return;
     }
@@ -1005,111 +981,56 @@ static void mqtt_gateway_process_command(
         }
         return;
     }
+    if (strcmp(command, "set_pid") != 0) {
+        mqtt_gateway_publish_ack(command_id, false, "Unknown command");
+        return;
+    }
     if (s_test.stage != MQTT_TEST_IDLE) {
         mqtt_gateway_publish_ack(command_id, false, "ESP32 test in progress");
         return;
     }
 
-    if (strcmp(command, "claim") == 0) {
-        esp_err_t result = ESP_OK;
-        if (snapshot.transport == COMM_MGR_ESP_NONE) {
-            result = CommMgr_ESP_SelectUSART(MQTT_GATEWAY_DEFAULT_UART_BAUD);
+    int32_t controller = 0;
+    int32_t kp = 0;
+    int32_t ki = 0;
+    int32_t kd = 0;
+    const bool has_kd = mqtt_gateway_json_int(payload, "kd", &kd);
+    const bool valid =
+        mqtt_gateway_json_int(payload, "controller", &controller) &&
+        mqtt_gateway_json_int(payload, "kp", &kp) &&
+        mqtt_gateway_json_int(payload, "ki", &ki) &&
+        controller >= 0 && controller <= 3 &&
+        kp >= 0 && kp <= INT16_MAX &&
+        ki >= 0 && ki <= INT16_MAX &&
+        (controller != COMM_MGR_ESP_PID_POSITION ||
+         (has_kd && kd >= 0 && kd <= INT16_MAX));
+    if (!valid) {
+        mqtt_gateway_publish_ack(command_id, false, "Invalid PID values");
+    } else if (snapshot.motor_running) {
+        mqtt_gateway_publish_ack(
+            command_id, false, "Stop motor before PID update");
+    } else {
+        mqtt_gateway_update_pid_snapshot(
+            (uint8_t)controller, (int16_t)kp, (int16_t)ki,
+            (int16_t)kd);
+        const CommMgr_ESP_pid_controller_t pid_controller =
+            (CommMgr_ESP_pid_controller_t)controller;
+        if (snapshot.transport == COMM_MGR_ESP_CAN &&
+            snapshot.link_active) {
+            CommMgr_ESP_SetPidGain(
+                pid_controller, COMM_MGR_ESP_PID_KP, (int16_t)kp);
+            CommMgr_ESP_SetPidGain(
+                pid_controller, COMM_MGR_ESP_PID_KI, (int16_t)ki);
+            if (controller == COMM_MGR_ESP_PID_POSITION) {
+                CommMgr_ESP_SetPidGain(
+                    pid_controller, COMM_MGR_ESP_PID_KD, (int16_t)kd);
+            }
         }
         mqtt_gateway_publish_ack(
-            command_id, result == ESP_OK,
-            result == ESP_OK ? "Gateway ready" : "UART activation failed");
-    } else if (strcmp(command, "set_mode") == 0) {
-        if (!has_value) {
-            mqtt_gateway_publish_ack(command_id, false, "Missing mode value");
-        } else if (mqtt_gateway_require_link(&snapshot, command_id)) {
-            CommMgr_ESP_SetMode(value == 0
-                ? COMM_MGR_ESP_MODE_SPEED : COMM_MGR_ESP_MODE_POSITION);
-            mqtt_gateway_publish_ack(command_id, true, "Mode accepted");
-        }
-    } else if (strcmp(command, "set_speed") == 0) {
-        if (!has_value) {
-            mqtt_gateway_publish_ack(command_id, false, "Missing speed value");
-        } else if (mqtt_gateway_require_link(&snapshot, command_id)) {
-            const int32_t speed = mqtt_gateway_clamp_i32(
-                value, -MQTT_GATEWAY_SPEED_LIMIT_RPM,
-                MQTT_GATEWAY_SPEED_LIMIT_RPM);
-            CommMgr_ESP_SetMode(COMM_MGR_ESP_MODE_SPEED);
-            CommMgr_ESP_SetSpeedRPM((int16_t)speed);
-            mqtt_gateway_publish_ack(command_id, true, "Speed accepted");
-        }
-    } else if (strcmp(command, "set_position") == 0) {
-        if (!has_value) {
-            mqtt_gateway_publish_ack(command_id, false, "Missing position value");
-        } else if (mqtt_gateway_require_link(&snapshot, command_id)) {
-            int32_t position = value % 36000;
-            if (position < 0) {
-                position += 36000;
-            }
-            CommMgr_ESP_SetMode(COMM_MGR_ESP_MODE_POSITION);
-            CommMgr_ESP_SetPositionCdeg((uint16_t)position);
-            mqtt_gateway_publish_ack(command_id, true, "Position accepted");
-        }
-    } else if (strcmp(command, "set_pid") == 0) {
-        int32_t controller = 0;
-        int32_t kp = 0;
-        int32_t ki = 0;
-        int32_t kd = 0;
-        const bool has_kd = mqtt_gateway_json_int(payload, "kd", &kd);
-        const bool valid =
-            mqtt_gateway_json_int(payload, "controller", &controller) &&
-            mqtt_gateway_json_int(payload, "kp", &kp) &&
-            mqtt_gateway_json_int(payload, "ki", &ki) &&
-            controller >= 0 && controller <= 3 &&
-            kp >= 0 && kp <= INT16_MAX &&
-            ki >= 0 && ki <= INT16_MAX &&
-            (controller != COMM_MGR_ESP_PID_POSITION ||
-             (has_kd && kd >= 0 && kd <= INT16_MAX));
-        if (!valid) {
-            mqtt_gateway_publish_ack(command_id, false, "Invalid PID values");
-        } else if (snapshot.motor_running) {
-            mqtt_gateway_publish_ack(
-                command_id, false, "Stop motor before PID update");
-        } else {
-            mqtt_gateway_update_pid_snapshot(
-                (uint8_t)controller, (int16_t)kp, (int16_t)ki,
-                (int16_t)kd);
-            const CommMgr_ESP_pid_controller_t pid_controller =
-                (CommMgr_ESP_pid_controller_t)controller;
-            if (snapshot.transport == COMM_MGR_ESP_CAN &&
-                snapshot.link_active) {
-                CommMgr_ESP_SetPidGain(
-                    pid_controller, COMM_MGR_ESP_PID_KP, (int16_t)kp);
-                CommMgr_ESP_SetPidGain(
-                    pid_controller, COMM_MGR_ESP_PID_KI, (int16_t)ki);
-                if (controller == COMM_MGR_ESP_PID_POSITION) {
-                    CommMgr_ESP_SetPidGain(
-                        pid_controller, COMM_MGR_ESP_PID_KD, (int16_t)kd);
-                }
-            }
-            mqtt_gateway_publish_ack(
-                command_id, true,
-                snapshot.transport == COMM_MGR_ESP_CAN && snapshot.link_active
-                    ? "PID applied and cached temporarily"
-                    : "PID cached for the next local test");
-        }
-    } else if (strcmp(command, "start") == 0) {
-        if (mqtt_gateway_require_link(&snapshot, command_id)) {
-            CommMgr_ESP_Start();
-            mqtt_gateway_publish_ack(command_id, true, "Start accepted");
-        }
-    } else if (strcmp(command, "ack_fault") == 0) {
-        if (mqtt_gateway_require_link(&snapshot, command_id)) {
-            CommMgr_ESP_AcknowledgeFault();
-            mqtt_gateway_publish_ack(
-                command_id, true, "Fault reset accepted");
-        }
-    } else if (strcmp(command, "zero_position") == 0) {
-        if (mqtt_gateway_require_link(&snapshot, command_id)) {
-            CommMgr_ESP_ZeroPosition();
-            mqtt_gateway_publish_ack(command_id, true, "Zero accepted");
-        }
-    } else {
-        mqtt_gateway_publish_ack(command_id, false, "Unknown command");
+            command_id, true,
+            snapshot.transport == COMM_MGR_ESP_CAN && snapshot.link_active
+                ? "PID applied and cached temporarily"
+                : "PID cached for the next local test");
     }
 }
 

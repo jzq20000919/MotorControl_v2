@@ -111,12 +111,6 @@ void motor_ui_mqtt_keyboard_event(lv_event_t *event);
 void motor_ui_mqtt_connect_event(lv_event_t *event);
 /** @brief 处理 MQTT 断开事件。 @param event LVGL 事件对象。 */
 void motor_ui_mqtt_disconnect_event(lv_event_t *event);
-/** @brief 处理 MQTT 测试发布事件。 @param event LVGL 事件对象。 */
-void motor_ui_mqtt_ping_event(lv_event_t *event);
-/** @brief 处理 MQTT 页面跳转到 Wi-Fi 页事件。 @param event LVGL 事件对象。 */
-void motor_ui_mqtt_wifi_event(lv_event_t *event);
-/** @brief 处理 MQTT 页面跳转到电机页事件。 @param event LVGL 事件对象。 */
-void motor_ui_mqtt_motor_event(lv_event_t *event);
 /** @brief 从本地 PID 测试页启动速度测试。 */
 void motor_ui_pid_speed_test_event(lv_event_t *event);
 /** @brief 从本地 PID 测试页启动位置测试。 */

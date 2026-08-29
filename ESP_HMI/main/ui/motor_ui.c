@@ -66,7 +66,6 @@ static lv_obj_t *s_wifi_detail_label;
 static lv_obj_t *s_wifi_keyboard;
 static lv_obj_t *s_mqtt_uri_textarea;
 static lv_obj_t *s_mqtt_page_state_label;
-static lv_obj_t *s_mqtt_rx_label;
 static lv_obj_t *s_mqtt_keyboard;
 static lv_obj_t *s_pid_test_pid_label;
 static lv_obj_t *s_pid_test_config_label;
@@ -604,10 +603,10 @@ static void ui_create_wifi_page(lv_obj_t *parent)
     lv_obj_add_flag(s_wifi_keyboard, LV_OBJ_FLAG_HIDDEN);
 }
 
-/** @brief 创建 MQTT Broker 配置与测试发布页面。 */
+/** @brief 创建 MQTT Broker 连接配置页面。 */
 static void ui_create_mqtt_page(lv_obj_t *parent)
 {
-    lv_obj_t *title = ui_create_label(parent, "MQTT TEST", UI_COLOR_TEXT, &lv_font_montserrat_20);
+    lv_obj_t *title = ui_create_label(parent, "MQTT", UI_COLOR_TEXT, &lv_font_montserrat_20);
     lv_obj_set_pos(title, 8, 4);
 
     s_mqtt_uri_textarea = lv_textarea_create(parent);
@@ -619,21 +618,13 @@ static void ui_create_mqtt_page(lv_obj_t *parent)
     motor_ui_style_textarea(s_mqtt_uri_textarea);
     lv_obj_add_event_cb(s_mqtt_uri_textarea, motor_ui_mqtt_uri_event, LV_EVENT_CLICKED, NULL);
 
-    ui_create_wifi_action_button(parent, "CONNECT", UI_COLOR_BLUE, 220, 34, motor_ui_mqtt_connect_event);
+    ui_create_wifi_action_button(parent, "CONNECT", UI_COLOR_BLUE, 220, 76, motor_ui_mqtt_connect_event);
+    ui_create_wifi_action_button(parent, "DISCONNECT", UI_COLOR_RED, 220, 118, motor_ui_mqtt_disconnect_event);
 
     s_mqtt_page_state_label = ui_create_label(parent, "Connect Wi-Fi, then connect MQTT", UI_COLOR_MUTED, &lv_font_montserrat_12);
-    lv_obj_set_pos(s_mqtt_page_state_label, 10, 75);
+    lv_obj_set_pos(s_mqtt_page_state_label, 10, 165);
     lv_obj_set_width(s_mqtt_page_state_label, 300);
-    lv_label_set_long_mode(s_mqtt_page_state_label, LV_LABEL_LONG_DOT);
-
-
-
-    s_mqtt_rx_label = ui_create_label(parent, "RX motor/hmi/test/rx\nNo message from MQTTX", UI_COLOR_MUTED, &lv_font_montserrat_12);
-    lv_obj_set_pos(s_mqtt_rx_label, 10, 149);
-    lv_obj_set_size(s_mqtt_rx_label, 202, 48);
-    lv_label_set_long_mode(s_mqtt_rx_label, LV_LABEL_LONG_DOT);
-
-    ui_create_wifi_action_button(parent, "DISCONNECT", UI_COLOR_RED, 220, 153, motor_ui_mqtt_disconnect_event);
+    lv_label_set_long_mode(s_mqtt_page_state_label, LV_LABEL_LONG_WRAP);
 
     s_mqtt_keyboard = lv_keyboard_create(lv_screen_active());
     lv_obj_set_size(s_mqtt_keyboard, 320, 160);
@@ -1034,13 +1025,9 @@ static void ui_update_mqtt_data(void)
 
     motor_ui_style_set_text_color(s_mqtt_status_label, snapshot.connected ? UI_COLOR_GREEN : UI_COLOR_RED);
     if (snapshot.connected) {
-        lv_label_set_text_fmt(s_mqtt_page_state_label, "CONNECTED  TX %lu  RX %lu", (unsigned long)snapshot.transmitted_messages, (unsigned long)snapshot.received_messages);
+        lv_label_set_text(s_mqtt_page_state_label, "CONNECTED");
     } else {
         lv_label_set_text(s_mqtt_page_state_label, snapshot.status);
-    }
-
-    if (snapshot.received_messages > 0U) {
-        lv_label_set_text_fmt(s_mqtt_rx_label, "RX %s\n%s", snapshot.last_topic, snapshot.last_payload);
     }
     s_mqtt_revision = snapshot.revision;
 }

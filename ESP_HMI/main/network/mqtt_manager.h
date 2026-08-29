@@ -9,12 +9,6 @@
 
 /** @brief MQTT Broker URI 的最大有效字符数。 */
 #define MQTT_MANAGER_URI_MAX_LEN 95U
-/** @brief MQTT 主题的最大有效字符数。 */
-#define MQTT_MANAGER_TOPIC_MAX_LEN 63U
-/** @brief MQTT 消息负载的最大有效字符数。 */
-#define MQTT_MANAGER_PAYLOAD_MAX_LEN 511U
-/** @brief HMI 联调时订阅的测试接收主题。 */
-#define MQTT_MANAGER_TEST_RX_TOPIC "motor/hmi/test/rx"
 /** @brief MQTT 电机控制命令订阅主题。 */
 #define MQTT_MANAGER_CONTROL_TOPIC "motor/control/command"
 
@@ -29,19 +23,15 @@ typedef void (*mqtt_manager_message_callback_t)(
     const char *payload,
     void *context);
 
-/** @brief MQTT 管理器的线程安全连接与流量快照。 */
+/** @brief MQTT 管理器的线程安全连接快照。 */
 typedef struct
 {
     bool initialized;                         /**< 管理任务和同步对象已初始化。 */
     bool connecting;                          /**< MQTT 客户端正在连接 Broker。 */
     bool connected;                           /**< MQTT 客户端已连接 Broker。 */
     uint32_t revision;                        /**< 状态变化时递增的版本号。 */
-    uint32_t transmitted_messages;            /**< 累计成功提交的发布消息数。 */
-    uint32_t received_messages;               /**< 累计收到的完整消息数。 */
     char broker_uri[MQTT_MANAGER_URI_MAX_LEN + 1U]; /**< 当前 Broker URI。 */
     char status[96];                          /**< 面向界面显示的状态文本。 */
-    char last_topic[MQTT_MANAGER_TOPIC_MAX_LEN + 1U]; /**< 最近接收消息的主题。 */
-    char last_payload[MQTT_MANAGER_PAYLOAD_MAX_LEN + 1U]; /**< 最近接收的消息负载。 */
 } mqtt_manager_snapshot_t;
 
 /** @brief 初始化互斥锁、队列和 MQTT 管理工作任务。 @return 成功返回 ESP_OK。 */
@@ -73,11 +63,6 @@ esp_err_t mqtt_manager_publish_tracked(
 esp_err_t mqtt_manager_publish_qos0(
     const char *topic,
     const char *payload);
-/** @brief 发布指定长度的 QoS 1 二进制数据，允许负载包含零字节。 */
-esp_err_t mqtt_manager_publish_binary_qos1(
-    const char *topic,
-    const void *payload,
-    size_t payload_length);
 /** @brief 发布 QoS 1 二进制数据并返回可用于查询 PUBACK 的消息 ID。 */
 esp_err_t mqtt_manager_publish_binary_qos1_tracked(
     const char *topic,
@@ -94,7 +79,7 @@ bool mqtt_manager_is_message_delivered(int message_id);
 void mqtt_manager_set_message_callback(
     mqtt_manager_message_callback_t callback,
     void *context);
-/** @brief 复制最新的线程安全 MQTT 连接与流量快照。 @param[out] snapshot 接收快照的对象。 */
+/** @brief 复制最新的线程安全 MQTT 连接快照。 @param[out] snapshot 接收快照的对象。 */
 void mqtt_manager_get_snapshot(mqtt_manager_snapshot_t *snapshot);
 
 #endif /* MQTT_MANAGER_H */
